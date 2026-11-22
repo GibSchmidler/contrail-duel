@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contrail Duel</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+</head>
+<body class="in-menu">
+  <canvas id="game"></canvas>
+  <canvas id="hud"></canvas>
+
+  <!-- Main menu -->
+  <div id="menu" class="screen">
+    <div class="panel wide">
+      <h1>CONTRAIL <span>DUEL</span></h1>
+      <p class="tag">1v1 jet dogfights · keyboard only · guns, heat-seekers &amp; flares</p>
+
+      <div class="grid">
+        <section>
+          <h2>Pilot</h2>
+          <label>Callsign <input id="callsign" maxlength="16" autocomplete="off"></label>
+          <label>First to
+            <select id="rounds"><option value="1">1 kill</option><option value="3">3 kills</option><option value="5">5 kills</option><option value="7">7 kills</option></select>
+          </label>
+          <label class="check"><input type="checkbox" id="invert"> W pulls the nose up (unchecked = flight-stick style, S pulls up)</label>
+          <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
+          <button id="btnMenuHelp" class="ghost">Controls &amp; tips</button>
+        </section>
+
+        <section>
+          <h2>Practice</h2>
+          <label>Opponent
+            <select id="difficulty">
+              <option value="drone">Target drone (doesn't shoot)</option>
+              <option value="rookie">Rookie</option>
+              <option value="pilot">Veteran</option>
+              <option value="ace">Ace</option>
+            </select>
+          </label>
+          <button id="btnPractice" class="primary">Fly vs AI</button>
+
+          <h2 class="mt">Online 1v1</h2>
+          <button id="btnQuick" class="primary">Quick match</button>
+          <button id="btnCreate">Create private room</button>
+          <div class="row">
+            <input id="joinCode" placeholder="CODE" maxlength="4" autocomplete="off">
+            <button id="btnJoin">Join room</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lobby -->
+  <div id="lobby" class="screen">
+    <div class="panel">
+      <h2>Online</h2>
+      <p id="lobbyText">Connecting…</p>
+      <button id="lobbyCancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause" class="screen">
+    <div class="panel">
+      <h2>Paused</h2>
+      <p id="pauseNote" class="dim"></p>
+      <button id="btnResume" class="primary">Resume (Esc)</button>
+      <button id="btnControls">Controls</button>
+      <button id="btnQuit">Leave match</button>
+    </div>
+  </div>
+
+  <!-- Match end -->
+  <div id="end" class="screen">
+    <div class="panel">
+      <h1 id="endTitle">VICTORY</h1>
+      <p id="endScore" class="big"></p>
+      <p id="endStatus" class="dim"></p>
+      <button id="btnRematch" class="primary">Rematch</button>
+      <button id="btnEndMenu">Main menu</button>
+    </div>
+  </div>
+
+  <!-- Help overlay -->
+  <div id="help">
+    <div class="panel wide">
+      <h2>Controls</h2>
+      <div class="grid">
+        <table>
+          <tr><td><kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd></td><td>Pitch (S pulls by default)</td></tr>
+          <tr><td><kbd>A</kbd>/<kbd>D</kbd> or <kbd>←</kbd>/<kbd>→</kbd></td><td>Roll</td></tr>
+          <tr><td><kbd>Q</kbd>/<kbd>E</kbd></td><td>Rudder (fine nose aim)</td></tr>
+          <tr><td><kbd>Shift</kbd> (hold)</td><td>Precision aiming</td></tr>
+          <tr><td><kbd>R</kbd>/<kbd>F</kbd></td><td>Throttle up / down (above 100% = afterburner)</td></tr>
+          <tr><td><kbd>B</kbd> (hold)</td><td>Airbrake</td></tr>
+          <tr><td><kbd>Space</kbd></td><td>Cannon</td></tr>
+          <tr><td><kbd>X</kbd></td><td>Fire IR missile (needs lock)</td></tr>
+          <tr><td><kbd>C</kbd></td><td>Flares</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Padlock camera (keeps the bandit in view)</td></tr>
+          <tr><td><kbd>G</kbd> (hold)</td><td>Look back</td></tr>
+          <tr><td><kbd>V</kbd></td><td>Chase / cockpit view</td></tr>
+          <tr><td><kbd>Esc</kbd> · <kbd>H</kbd></td><td>Pause · this help</td></tr>
+        </table>
+        <div class="tips">
+          <h3>Flying</h3>
+          <p>The jet is fly-by-wire: holding pull commands up to 9 G, limited by angle of attack. Hard turns bleed speed fast. Best turn rate is around <b>420–450 kts</b>. Trade altitude for speed by diving, and use the afterburner to recover energy.</p>
+          <p>Sustained high G fills the <b>G-STRESS</b> bar, and when it's full you black out briefly. Ease off to recover.</p>
+          <h3>Guns</h3>
+          <p>Put the gun cross on the <b>lead pipper</b> (the circle with a dot) to hit. The arc around it shows range, and the cannon is effective inside about 1,200 m. Hold <kbd>Shift</kbd> for fine corrections.</p>
+          <h3>Missiles</h3>
+          <p>Keep the bandit inside the dashed seeker circle until the tone goes steady and you see <b>LOCK</b>. Lock range is much longer from behind (hot tailpipe) and when the bandit is in afterburner.</p>
+          <p>When <b>MISSILE</b> flashes, turn so the missile is off your wing (beam it), pop flares, and cut the afterburner. Missiles lose energy in hard turns.</p>
+        </div>
+      </div>
+      <button id="btnHelpClose" class="primary">Close (H)</button>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

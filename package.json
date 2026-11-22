@@ -1,0 +1,17 @@
+{
+  "name": "contrail-duel",
+  "version": "1.0.0",
+  "description": "Browser-based 3D 1v1 jet dogfighting with keyboard controls, online matchmaking and a practice AI.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "three": "0.160.0",
+    "ws": "8.22.1"
+  }
+}
