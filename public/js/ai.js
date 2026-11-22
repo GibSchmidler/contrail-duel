@@ -1,14 +1,15 @@
 // Practice AI. It flies the same flight model with the same weapons through the
 // same control inputs a human uses, with skill-dependent reaction time, aim and G use.
 import * as THREE from 'three';
-import { computeLeadDir } from './flight.js';
+import { computeLeadDir, airDensity } from './flight.js';
+import { VISUAL_RANGE, firstOf, countOf, flyout, launchZone } from './arsenal.js';
 import { groundHeight, ARENA_RADIUS } from './world.js';
 
 export const SKILLS = {
-  drone:  { label: 'Target drone', react: 0.5, maxPull: 0.55, aimTol: 0, gunRange: 0, missiles: false, mslCd: 99, flareP: 0, defend: false },
-  rookie: { label: 'Rookie', react: 0.45, maxPull: 0.7, aimTol: 0.035, aimNoise: 0.025, gunRange: 900, missiles: true, mslCd: 16, flareP: 0.35, defend: true },
-  pilot:  { label: 'Veteran', react: 0.25, maxPull: 0.88, aimTol: 0.022, aimNoise: 0.012, gunRange: 1100, missiles: true, mslCd: 9, flareP: 0.75, defend: true },
-  ace:    { label: 'Ace', react: 0.12, maxPull: 1.0, aimTol: 0.016, aimNoise: 0.004, gunRange: 1300, missiles: true, mslCd: 6, flareP: 0.95, defend: true },
+  drone:  { label: 'Target drone', loadout: 'knife', react: 0.5, maxPull: 0.55, aimTol: 0, gunRange: 0, missiles: false, mslCd: 99, flareP: 0, defend: false, notch: 0 },
+  rookie: { label: 'Rookie', loadout: 'classic', react: 0.45, maxPull: 0.7, aimTol: 0.035, aimNoise: 0.025, gunRange: 900, missiles: true, mslCd: 16, flareP: 0.35, defend: true, notch: 0.2, mrmFrac: 0.6 },
+  pilot:  { label: 'Veteran', loadout: 'balanced', react: 0.25, maxPull: 0.88, aimTol: 0.022, aimNoise: 0.012, gunRange: 1100, missiles: true, mslCd: 9, flareP: 0.75, defend: true, notch: 0.7, mrmFrac: 0.7 },
+  ace:    { label: 'Ace', loadout: 'balanced', react: 0.12, maxPull: 1.0, aimTol: 0.016, aimNoise: 0.004, gunRange: 1300, missiles: true, mslCd: 6, flareP: 0.95, defend: true, notch: 0.95, mrmFrac: 0.6 },
 };
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -46,14 +47,15 @@ export class AIPilot {
     this.wobbleT = 0;
     this.defendingId = null;
     this.willFlare = false;
-    this.out = { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false, gun: false, missile: false, flare: false };
+    this.out = { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false, gun: false, missile: false, flare: false, chaff: false, weapon: 'srm', wantStt: false };
+    this.lastKnown = null; this.zoneT = 0; this.zone = null; this.supportT = 0;
   }
 
-  reset() { this.hist.length = 0; this.missileCd = 4 + Math.random() * 4; this.burstT = 0; this.defendingId = null; }
+  reset() { this.hist.length = 0; this.missileCd = 4 + Math.random() * 4; this.burstT = 0; this.defendingId = null; this.lastKnown = null; this.zone = null; this.supportT = 0; }
 
   // Target state the AI "perceives": delayed by reaction time, then extrapolated.
-  perceive(target) {
-    this.hist.push({ t: this.time, p: target.pos.clone(), v: target.vel.clone() });
+  perceive(pos, vel) {
+    this.hist.push({ t: this.time, p: pos.clone(), v: vel.clone() });
     while (this.hist.length > 2 && this.hist[1].t < this.time - this.skill.react) this.hist.shift();
     const h = this.hist[0];
     const lag = this.time - h.t;
@@ -61,21 +63,26 @@ export class AIPilot {
     _tv.copy(h.v);
   }
 
-  update(dt, target, combat) {
+  update(dt, target, combat, threat) {
     const P = this.plane, S = this.skill, o = this.out;
     this.time += dt;
-    this.missileCd -= dt; this.flareCd -= dt; this.burstT -= dt;
-    o.gun = false; o.missile = false; o.flare = false; o.airbrake = false;
+    this.missileCd -= dt; this.flareCd -= dt; this.burstT -= dt; this.supportT -= dt;
+    o.gun = false; o.missile = false; o.flare = false; o.chaff = false; o.airbrake = false;
     if (!P.alive) return o;
     if (!target || !target.alive) { // victory lap
       _d.copy(P.fwd); _d.y = 0.05; _d.normalize();
-      steer(P, _d, 0.4, o); o.throttle = 0.8; return o;
+      steer(P, _d, 0.4, o); o.throttle = 0.8; o.wantStt = false; return o;
     }
-    this.perceive(target);
+    // ---------- what the AI knows: its radar track or its eyes, like a human ----------
+    const trueDist = target.pos.distanceTo(P.pos);
+    const known = P.radar.contact || trueDist < VISUAL_RANGE;
+    if (known) {
+      const src = trueDist < VISUAL_RANGE || !P.radar.contact ? target : P.radar;
+      this.perceive(src.pos, src.vel);
+      this.lastKnown = (this.lastKnown || new THREE.Vector3()).copy(src.pos);
+    }
 
     const speed = P.speed;
-    const rel = _t.copy(_tp).sub(P.pos);
-    const dist = rel.length();
     let maxPull = S.maxPull;
     o.throttle = 1.0;
 
@@ -99,42 +106,75 @@ export class AIPilot {
     if (S.label === 'Target drone') {
       const a = this.time * 0.08;
       _d.set(Math.cos(a), (3200 - P.pos.y) / 3000, Math.sin(a)).normalize();
-      steer(P, _d, S.maxPull, o); o.throttle = 0.75; return o;
+      steer(P, _d, S.maxPull, o); o.throttle = 0.75; o.wantStt = false; return o;
     }
 
-    // ---------- priority 3: missile defense ----------
-    const threats = combat.threatsTo(P);
-    let threat = null, tDist = 1e9;
-    for (const m of threats) { const d = m.pos.distanceTo(P.pos); if (d < tDist) { tDist = d; threat = m; } }
-    if (S.defend && threat && tDist < 4500) {
-      if (this.defendingId !== threat.id) { this.defendingId = threat.id; this.willFlare = Math.random() < S.flareP; }
-      // beam the missile: fly perpendicular to its line of sight, slightly nose low
-      const los = _aim.copy(P.pos).sub(threat.pos).normalize();
+    // ---------- priority 3: missile defense, from RWR / MAWS cues only ----------
+    let tPos = null, tDist = 1e9, tKind = null;
+    if (threat) {
+      for (const t of threat.list) if (t.dist < tDist) { tDist = t.dist; tPos = t.pos; tKind = t.kind; }
+      if (!tPos && threat.launch && threat.emitter) { tPos = threat.emitter; tDist = 12000; tKind = 'launch'; }
+    }
+    const radarThreat = tKind === 'active' || tKind === 'launch';
+    if (S.defend && tPos && tDist < (radarThreat ? 16000 : 4500)) {
+      if (this.defendingId !== tKind) { this.defendingId = tKind; this.willFlare = Math.random() < S.flareP; this.willNotch = Math.random() < S.notch; }
+      // beam: fly perpendicular to the threat's line of sight. Against radar missiles also
+      // dive so the ground is behind us (the Doppler notch); against IR cut the burner.
+      const los = _aim.copy(P.pos).sub(tPos).normalize();
       _d.crossVectors(los, _t.set(0, 1, 0)).normalize();
       if (_d.dot(P.fwd) < 0) _d.negate();
-      _d.y = P.pos.y > 2200 ? -0.25 : 0.1; _d.normalize();
-      steer(P, _d, tDist < 1500 ? 1.0 : maxPull, o);
-      o.throttle = tDist < 1800 && S.flareP > 0.7 ? 0.4 : 1.15;
-      if (this.willFlare && tDist < 2000 && this.flareCd <= 0) { o.flare = true; this.flareCd = 0.45; }
+      if (radarThreat && this.willNotch) _d.y = P.pos.y > 1800 ? -0.35 : 0.0;
+      else _d.y = P.pos.y > 2200 ? -0.25 : 0.1;
+      _d.normalize();
+      steer(P, _d, tDist < 2500 ? 1.0 : maxPull, o);
+      if (radarThreat) {
+        o.throttle = 1.1;
+        if (this.willFlare && tKind === 'active' && tDist < 7000 && this.flareCd <= 0) { o.chaff = true; this.flareCd = 0.8; }
+      } else {
+        o.throttle = tDist < 1800 && S.flareP > 0.7 ? 0.4 : 1.15;
+        if (this.willFlare && tDist < 2200 && this.flareCd <= 0) { o.flare = true; this.flareCd = 0.45; }
+      }
+      // keep supporting our own AMRAAM if the bandit is still inside the radar gimbal
+      o.wantStt = this.supportT > 0;
+      return o;
+    }
+    this.defendingId = null;
+
+    // ---------- no contact: search toward where the bandit was last seen ----------
+    if (!known || !this.hist.length) {
+      const goal = this.lastKnown || _t.set(0, 3000, 0);
+      _d.copy(goal).sub(P.pos); _d.y = (3500 - P.pos.y) * 0.5; _d.normalize();
+      // gentle weave sweeps the radar across more sky
+      _d.addScaledVector(P.right, Math.sin(this.time * 0.4) * 0.25).normalize();
+      steer(P, _d, 0.6, o); o.throttle = 1.0; o.wantStt = false;
+      if (this.lastKnown && P.pos.distanceTo(this.lastKnown) < 2000) this.lastKnown = null;
       return o;
     }
 
     // ---------- offense ----------
+    const rel = _t.copy(_tp).sub(P.pos);
+    const dist = rel.length();
     computeLeadDir(P.pos, P.vel, _tp, _tv, _lead);
     const losDir = _d.copy(rel).divideScalar(dist);
     const closing = -rel.dot(_aim.copy(_tv).sub(P.vel)) / dist;
     const offBore = Math.acos(clamp(losDir.dot(P.fwd), -1, 1));
 
+    // weapon choice: AMRAAM beyond visual range, Sidewinder close in
+    const nM = countOf(P.stores, 'mrm'), nS = countOf(P.stores, 'srm');
+    o.weapon = (nM > 0 && dist > 4500) || nS === 0 ? 'mrm' : 'srm';
+    o.wantStt = dist < 30000 && (o.weapon === 'mrm' || dist < 9000);
+    if (this.supportT > 0) o.wantStt = true;
+
     if (dist < 1700) {
       _aim.copy(_lead);
-      // imperfect aim wobble for lower skill
       this.wobbleT -= dt;
       if (this.wobbleT <= 0) { this.wobbleT = 0.6; this.wobble.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(S.aimNoise * 2); }
       _aim.add(this.wobble).normalize();
     } else {
       _aim.copy(_tp).addScaledVector(_tv, Math.min(dist / 700, 3)).sub(P.pos).normalize();
+      // AMRAAM in the air: after the seeker is about to go active, crank 40° off to slow the closure
+      if (this.supportT > 0 && this.supportT < 8 && S.notch > 0.6) _aim.addScaledVector(P.right, 0.5).normalize();
     }
-    // overshoot control: about to fly past a turning target -> lag pursuit + throttle back
     if (dist < 700 && closing > 110 && offBore > 0.35) {
       _aim.copy(_tp).addScaledVector(_tv, -0.8).sub(P.pos).normalize();
       o.throttle = 0.3; o.airbrake = closing > 160;
@@ -150,13 +190,23 @@ export class AIPilot {
 
     // ---------- weapons ----------
     const aimErr = Math.acos(clamp(_lead.dot(P.fwd), -1, 1));
-    // only aces take high-closure head-on snapshots
     const headOn = closing > 350 && -target.fwd.dot(losDir) > 0.8;
     const shotOk = !headOn || S.label === 'Ace';
     if (shotOk && dist < S.gunRange && aimErr < S.aimTol + 2.2 / Math.max(dist, 50) && P.gunAmmo > 0) this.burstT = 0.25 + Math.random() * 0.35;
     if (this.burstT > 0 && dist < S.gunRange * 1.15) o.gun = true;
-    if (S.missiles && P.locked && P.missiles > 0 && this.missileCd <= 0 && dist > 700 && dist < 3800) {
-      o.missile = true; this.missileCd = S.mslCd * (0.7 + Math.random() * 0.6);
+    if (S.missiles && this.missileCd <= 0 && P.weapon === o.weapon) {
+      if (o.weapon === 'srm' && P.locked && nS > 0 && dist > 500 && dist < 4200) {
+        o.missile = true; this.missileCd = S.mslCd * (0.7 + Math.random() * 0.6);
+      } else if (o.weapon === 'mrm' && nM > 0 && P.radar.stt) {
+        this.zoneT -= dt;
+        if (this.zoneT <= 0 || !this.zone) {
+          this.zoneT = 0.5;
+          this.zone = launchZone(flyout('aim120', P.speed, airDensity(P.pos.y)), -rel.dot(_tv) / dist, _tv.length());
+        }
+        if (dist < this.zone.rMax * S.mrmFrac && dist > this.zone.rMin && offBore < 0.35 && P.vel.y > -30 && agl > 700) {
+          o.missile = true; this.missileCd = S.mslCd * (1.2 + Math.random() * 0.6); this.supportT = 22;
+        }
+      }
     }
     return o;
   }

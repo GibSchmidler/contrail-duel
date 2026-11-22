@@ -5,6 +5,8 @@
 // induced drag, wave drag, thrust lapse with altitude and gravity are physical,
 // so energy management (speed <-> altitude <-> turn rate) matters.
 import * as THREE from 'three';
+import { LOADOUTS, GUN, storeMass, storeDrag, countOf } from './arsenal.js';
+import { newRadar } from './sensors.js';
 
 export const GRAV = 9.81;
 export const SOUND_SPEED = 340;
@@ -61,8 +63,21 @@ export class Aircraft {
   }
 
   get ab() { return this.throttle > 1.001; }
+  get radarMode() { return this.alive ? (this.radar.stt ? 2 : 1) : 0; }
+  get missiles() { let n = 0; for (const s of this.stores) if (s) n++; return n; }
 
-  reset(pos, quat, speed) {
+  setLoadout(key) {
+    this.loadout = LOADOUTS[key] ? key : 'balanced';
+    this.stores = LOADOUTS[this.loadout].st.slice();
+    this.updateStores();
+    this.weapon = countOf(this.stores, 'mrm') > 0 ? 'mrm' : 'srm';
+  }
+  updateStores() {
+    this.mass = JET.mass + storeMass(this.stores);
+    this.storeCd = storeDrag(this.stores);
+  }
+
+  reset(pos, quat, speed, loadout = this.loadout) {
     this.pos.copy(pos); this.prevPos.copy(pos);
     this.quat.copy(quat);
     this.updateAxes();
@@ -75,8 +90,10 @@ export class Aircraft {
     this.hp = 100; this.alive = true;
     this.gloc = 0; this.blackedOut = false;
     this.airbrake = false;
-    this.gunAmmo = 510; this.missiles = 4; this.flares = 30;
-    this.gunHeat = 0; this.gunAcc = 0; this.firing = false;
+    this.setLoadout(loadout);
+    this.gunAmmo = GUN.ammo; this.flares = 30; this.chaff = 30;
+    this.gunSpin = 0; this.gunAcc = 0; this.firing = false;
+    this.radar = newRadar(); this.lastSide = 1; this.offBore = 99;
     this.lockProgress = 0; this.locked = false; this.inCone = false;
     this.missileCd = 0; this.flareCd = 0;
     this.outOfBounds = 0;
@@ -98,7 +115,7 @@ export class Aircraft {
     const rho = airDensity(this.pos.y);
     const qbar = 0.5 * rho * V * V;
     const qS = qbar * JET.S;
-    const m = JET.mass;
+    const m = this.mass;
 
     const vF = this.vel.dot(F), vU = this.vel.dot(U), vR = this.vel.dot(R);
     this.alpha = Math.atan2(-vU, vF);
@@ -122,7 +139,7 @@ export class Aircraft {
     const side = -qS * JET.cyb * this.beta;
     this.airbrake = !!inp.airbrake;
     const cd = JET.cd0 + JET.wave * smooth(0.85, 1.05, this.mach) + JET.k * cl * cl +
-      (this.airbrake ? JET.brakeCd : 0) + 0.6 * this.beta * this.beta;
+      (this.airbrake ? JET.brakeCd : 0) + 0.6 * this.beta * this.beta + this.storeCd;
     const drag = qS * cd;
 
     this.throttle = clamp(inp.throttle, 0, JET.maxThrottle);
@@ -180,18 +197,27 @@ export class Aircraft {
   }
 }
 
-// Gun ballistics shared by the gunsight, AI and bullets.
-export const MUZZLE_VEL = 1050;
-const _D = new THREE.Vector3(), _rv = new THREE.Vector3();
-// Returns the unit aim direction needed to hit a target (no drag, gravity only).
+// Gun ballistics shared by the gunsight, AI and bullets. Bullets keep their launch
+// direction and slow down with drag: |v| decays as v0 / (1 + k v0 t), so distance
+// along the path is v0 * g(t) with g(t) = ln(1 + k v0 t) / (k v0).
+export const MUZZLE_VEL = GUN.muzzle;
+export function bulletDragK(alt) { return GUN.dragK * airDensity(alt) / 1.225; }
+const _D = new THREE.Vector3(), _vb = new THREE.Vector3();
+// Returns the unit aim direction needed to hit a target with drag and gravity.
 export function computeLeadDir(shooterPos, shooterVel, tPos, tVel, out) {
-  const rel = out.copy(tPos).sub(shooterPos);
-  _rv.copy(tVel).sub(shooterVel);
-  let t = rel.length() / MUZZLE_VEL;
-  for (let i = 0; i < 4; i++) {
-    _D.copy(rel).addScaledVector(_rv, t);
+  const k = bulletDragK(shooterPos.y);
+  let t = tPos.distanceTo(shooterPos) / (MUZZLE_VEL + shooterVel.length());
+  out.copy(tPos).sub(shooterPos).normalize();
+  for (let i = 0; i < 6; i++) {
+    const v0 = _vb.copy(shooterVel).addScaledVector(out, MUZZLE_VEL).length();
+    const g = Math.log(1 + k * v0 * t) / (k * v0);
+    // muzzle * D * g = rel + tVel * t - shooterVel * g + 0.5 * G * t^2 (up)
+    _D.copy(tPos).sub(shooterPos).addScaledVector(tVel, t).addScaledVector(shooterVel, -g);
     _D.y += 0.5 * GRAV * t * t;
-    t = _D.length() / MUZZLE_VEL;
+    const gNeed = _D.length() / MUZZLE_VEL;
+    out.copy(_D).normalize();
+    const kv = k * v0 * gNeed;
+    t = kv < 0.95 ? (Math.exp(k * v0 * gNeed) - 1) / (k * v0) : 6; // beyond ~5 s the round is spent
   }
-  return out.copy(_D).normalize();
+  return out;
 }

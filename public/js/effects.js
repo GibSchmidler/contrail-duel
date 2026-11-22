@@ -109,6 +109,7 @@ class ParticleSystem {
 
 const WHITE = [0.95, 0.95, 0.95], GREY = [0.55, 0.55, 0.57], DARK = [0.12, 0.12, 0.12], DARK2 = [0.25, 0.24, 0.23];
 const FIRE0 = [1.0, 0.85, 0.5], FIRE1 = [0.9, 0.25, 0.05], FLARE0 = [1, 1, 0.9], FLARE1 = [1, 0.6, 0.2];
+const CHAFF0 = [0.75, 0.78, 0.85], CHAFF1 = [0.7, 0.72, 0.75];
 const R = () => Math.random() - 0.5;
 
 export class Effects {
@@ -126,13 +127,18 @@ export class Effects {
     this.fire.mat.uniforms.scale.value = s;
   }
 
-  missileTrail(p, v, burning) {
-    if (burning) {
-      this.fire.emit(p.x, p.y, p.z, v.x * 0.2, v.y * 0.2, v.z * 0.2, 0.08, 1.6, 0.6, FIRE0, FIRE1, 0.9);
-      this.smoke.emit(p.x + R(), p.y + R(), p.z + R(), R() * 2, R() * 2, R() * 2, 3.5 + Math.random(), 1.5, 9, WHITE, GREY, 0.55, 0.3, 0.6);
-    } else {
-      this.smoke.emit(p.x, p.y, p.z, 0, 0, 0, 1.2, 0.8, 3, WHITE, GREY, 0.18, 0.3, 0.3);
-    }
+  // Only a burning motor leaves a plume; once it burns out the missile is nearly invisible.
+  missileTrail(p, v, burning, key) {
+    if (!burning) return;
+    const big = key === 'aim120';
+    this.fire.emit(p.x, p.y, p.z, v.x * 0.2, v.y * 0.2, v.z * 0.2, 0.08, big ? 2.0 : 1.6, 0.6, FIRE0, FIRE1, 0.9);
+    this.smoke.emit(p.x + R(), p.y + R(), p.z + R(), R() * 2, R() * 2, R() * 2, 3.5 + Math.random(), 1.5, big ? 11 : 9, WHITE, GREY, key === 'aim9m' ? 0.4 : 0.5, 0.3, 0.6);
+  }
+
+  // Chaff bloom: a quick glittering grey cloud.
+  chaff(p, t) {
+    if (Math.random() < 0.5) this.fire.emit(p.x + R() * 6, p.y + R() * 6, p.z + R() * 6, R() * 3, R() * 3, R() * 3, 0.15, 0.6, 0.3, CHAFF0, CHAFF0, 0.8);
+    if (t < 0.15) for (let i = 0; i < 6; i++) this.smoke.emit(p.x + R() * 4, p.y + R() * 4, p.z + R() * 4, R() * 6, R() * 6, R() * 6, 2.5, 3, 12, CHAFF1, GREY, 0.28, 1.5, 0.3);
   }
 
   flare(p) {

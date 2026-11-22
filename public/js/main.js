@@ -1,9 +1,11 @@
 import * as THREE from 'three';
-import { Aircraft, computeLeadDir } from './flight.js';
+import { Aircraft, computeLeadDir, airDensity } from './flight.js';
 import { World, groundHeight, ARENA_RADIUS } from './world.js';
 import { buildJet } from './models.js';
 import { Effects } from './effects.js';
-import { Combat, updateLock, GUN_RATE, SEEKER_CONE } from './weapons.js';
+import { Combat, GUN_RATE } from './weapons.js';
+import { updateRadar, updateIrLock, assessThreats } from './sensors.js';
+import { WEAPONS, GUN, VISUAL_RANGE, firstOf, countOf, nextStation, flyout, launchZone } from './arsenal.js';
 import { Input } from './input.js';
 import { AIPilot, SKILLS } from './ai.js';
 import { Hud } from './hud.js';
@@ -13,7 +15,7 @@ import { Net, RemotePlane, packState } from './net.js';
 const $ = (id) => document.getElementById(id);
 
 // ---------------- settings ----------------
-const settings = Object.assign({ name: 'Viper', invert: false, rounds: 3, difficulty: 'pilot', sound: true }, (() => {
+const settings = Object.assign({ name: 'Viper', invert: false, rounds: 3, difficulty: 'pilot', sound: true, loadout: 'balanced', engage: 'bvr' }, (() => {
   try { return JSON.parse(localStorage.getItem('contrail-settings') || '{}'); } catch { return {}; }
 })());
 function saveSettings() { try { localStorage.setItem('contrail-settings', JSON.stringify(settings)); } catch {} }
@@ -72,6 +74,9 @@ const G = {
   rematch: { me: false, opp: false },
   msg: '', msgT: 0,
   attract: 0,
+  engage: 'bvr',
+  threat: null,
+  dlz: null, dlzT: 0,
 };
 G.me.netId = G.netId;
 
@@ -125,7 +130,7 @@ function registerDeath(who) {
 
 function sendPhase() {
   if (G.mode !== 'online' || G.role !== 'host') return;
-  net.send({ t: 'phase', ph: G.phase, pt: G.phaseT, sc: [G.scores.me, G.scores.opp], r: G.round, tw: G.roundsToWin });
+  net.send({ t: 'phase', ph: G.phase, pt: G.phaseT, sc: [G.scores.me, G.scores.opp], r: G.round, tw: G.roundsToWin, en: G.engage });
 }
 
 function setPhase(ph, t = 0) {
@@ -135,24 +140,30 @@ function setPhase(ph, t = 0) {
 }
 
 // ---------------- spawning / rounds ----------------
-const SPAWN = [
-  { pos: new THREE.Vector3(-150, 3000, 3600), quat: new THREE.Quaternion() },
-  { pos: new THREE.Vector3(150, 3000, -3600), quat: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI) },
-];
+// Merge: 7 km apart, inside visual range. BVR: 36 km apart, radar and AMRAAM range.
+const SPAWN_QUAT = [new THREE.Quaternion(), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)];
+function spawnPos(side) {
+  const half = G.engage === 'merge' ? 3600 : 18000, off = G.engage === 'merge' ? 150 : 900;
+  return side === 0 ? new THREE.Vector3(-off, 3000, half) : new THREE.Vector3(off, 3000, -half);
+}
 
 function startRound() {
   G.round++;
   combat.clear();
   effects.clear();
   const mySide = G.mode === 'online' && G.role === 'guest' ? 1 : 0;
-  G.me.reset(SPAWN[mySide].pos, SPAWN[mySide].quat, 210);
+  const spd = G.engage === 'merge' ? 210 : 250;
+  G.me.reset(spawnPos(mySide), SPAWN_QUAT[mySide], spd, settings.loadout);
+  G.me.wantStt = false;
   if (G.mode === 'ai') {
-    G.opp.reset(SPAWN[1 - mySide].pos, SPAWN[1 - mySide].quat, 210);
+    G.opp.reset(spawnPos(1 - mySide), SPAWN_QUAT[1 - mySide], spd, G.ai.skill.loadout);
+    G.opp.wantStt = false;
     G.ai.reset();
   } else if (G.opp) {
     G.opp.hardReset(); G.opp.alive = true; G.opp.hp = 100;
-    G.opp.pos.copy(SPAWN[1 - mySide].pos); G.opp.prevPos.copy(G.opp.pos); G.opp.quat.copy(SPAWN[1 - mySide].quat);
+    G.opp.pos.copy(spawnPos(1 - mySide)); G.opp.prevPos.copy(G.opp.pos); G.opp.quat.copy(SPAWN_QUAT[1 - mySide]);
   }
+  G.threat = null; G.dlz = null;
   input.reset();
   G.camQuat.copy(G.me.quat);
   G.deathPos = null;
@@ -166,6 +177,7 @@ function startPractice() {
   G.oppName = SKILLS[settings.difficulty].label.toUpperCase();
   G.ai = new AIPilot(G.opp, settings.difficulty);
   G.scores = { me: 0, opp: 0 }; G.round = 0; G.roundsToWin = settings.rounds;
+  G.engage = settings.engage;
   G.paused = false;
   enterGame();
   startRound();
@@ -175,6 +187,7 @@ function startOnlineMatch() {
   G.scores = { me: 0, opp: 0 }; G.round = 0;
   G.rematch = { me: false, opp: false };
   G.roundsToWin = settings.rounds;
+  G.engage = settings.engage;
   enterGame();
   startRound();
   sendPhase();
@@ -216,6 +229,7 @@ net.on('phase', (m) => {
     if (m.r === 1) { G.rematch = { me: false, opp: false }; }
     showScreen(null);
     G.round = m.r - 1;
+    G.engage = m.en === 'merge' ? 'merge' : 'bvr';
     startRound();
     G.phaseT = m.pt;
     return;
@@ -237,6 +251,10 @@ net.on('dead', (m) => {
 net.on('fl', (m) => {
   if (G.mode !== 'online' || !G.opp) return;
   for (const f of m.f) combat.addFlare(new THREE.Vector3(f[0], f[1], f[2]), new THREE.Vector3(f[3], f[4], f[5]), 'r' + m.id, G.opp);
+});
+net.on('ch', (m) => {
+  if (G.mode !== 'online' || !G.opp) return;
+  for (const c of m.c) combat.addChaff(new THREE.Vector3(c[0], c[1], c[2]), new THREE.Vector3(c[3], c[4], c[5]), 'r' + m.id, G.opp);
 });
 net.on('mx', (m) => combat.removeRemoteMissile(m.id, m.p ? new THREE.Vector3(...m.p) : null));
 net.on('rematch', () => {
@@ -272,40 +290,57 @@ async function online(action, code) {
 }
 
 // ---------------- weapons ----------------
-function handleWeapons(plane, wantGun, wantMissile, wantFlare, target, dt, isLocalHuman) {
+const pack = (list) => list.map((f) => [f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.vel.y, f.vel.z].map((x) => Math.round(x * 10) / 10));
+// ctl: { gun, missile, flare, chaff }
+function handleWeapons(plane, ctl, target, dt, isLocalHuman) {
   const hot = G.phase === 'fight' || G.phase === 'roundEnd';
-  plane.missileCd -= dt; plane.flareCd -= dt;
-  plane.firing = hot && plane.alive && wantGun && plane.gunAmmo > 0;
-  if (plane.firing) {
-    plane.gunAcc += dt * GUN_RATE;
+  plane.missileCd -= dt; plane.flareCd -= dt; plane.chaffCd = (plane.chaffCd || 0) - dt;
+  // M61: electric motor spins the barrels up before rounds come out at the full 100/s
+  const trigger = hot && plane.alive && ctl.gun && plane.gunAmmo > 0;
+  plane.gunSpin = trigger ? Math.min(1, plane.gunSpin + dt / GUN.spinUp) : Math.max(0, plane.gunSpin - dt / 0.5);
+  plane.firing = trigger;
+  if (trigger) {
+    const rate = GUN_RATE * plane.gunSpin;
+    plane.gunAcc += dt * rate;
     let n = 0;
     while (plane.gunAcc >= 1 && plane.gunAmmo > 0) {
       plane.gunAcc -= 1; plane.gunAmmo--;
-      combat.fireBullet(plane, true, (n++ / (dt * GUN_RATE + 1)) * dt);
+      combat.fireBullet(plane, true, (n++ / (dt * rate + 1)) * dt);
     }
-    effects.muzzle(plane.pos.clone().addScaledVector(plane.fwd, 7.5).addScaledVector(plane.right, -0.7).addScaledVector(plane.up, 0.35), plane.vel);
-  } else plane.gunAcc = 0.99;
+    if (plane.gunSpin > 0.2) effects.muzzle(plane.pos.clone().addScaledVector(plane.fwd, 7.5).addScaledVector(plane.right, -0.7).addScaledVector(plane.up, 0.35), plane.vel);
+  } else plane.gunAcc = 0;
 
   if (!hot || !plane.alive) return;
-  if (wantMissile) {
-    if (plane.missiles <= 0) { if (isLocalHuman) flash('NO MISSILES'); }
-    else if (plane.missileCd > 0) { /* rail cooldown */ }
-    else if (!plane.locked) { if (isLocalHuman) flash('NO LOCK — keep the bandit in the seeker circle'); }
+  if (ctl.missile && plane.missileCd <= 0) {
+    const cls = plane.weapon;
+    const key = firstOf(plane.stores, cls);
+    if (!key) { if (isLocalHuman) flash(cls === 'mrm' ? 'NO AIM-120 LEFT — press 1 for Sidewinders' : 'NO SIDEWINDERS LEFT'); }
+    else if (cls === 'srm' && !plane.locked) { if (isLocalHuman) flash('NO LOCK — wait for the steady tone'); }
+    else if (cls === 'mrm' && !plane.radar.contact) { if (isLocalHuman) flash('NO RADAR TRACK — point the nose at the bandit'); }
     else {
-      combat.launchMissile(plane, target);
-      plane.missiles--; plane.missileCd = 0.8; plane.lockProgress = 0.6;
+      const st = nextStation(plane.stores, cls, plane.lastSide);
+      plane.stores[st] = null; plane.updateStores(); plane.lastSide = st % 2;
+      combat.launchMissile(plane, target, key, st);
+      plane.missileCd = 0.8;
+      if (cls === 'srm') plane.lockProgress = 0.6;
       audio.launch(isLocalHuman ? null : plane.pos);
+      if (isLocalHuman) flash(cls === 'mrm' ? (plane.radar.stt ? 'FOX 3 — keep the lock for datalink' : 'FOX 3 — no lock, no datalink') : 'FOX 2', 1.6);
     }
   }
-  if (wantFlare && plane.flareCd <= 0 && plane.flares > 0) {
+  if (ctl.flare && plane.flareCd <= 0 && plane.flares > 0) {
     const popId = combat.popFlares(plane);
     plane.flares--; plane.flareCd = 0.35;
     if (isLocalHuman) {
       audio.flare();
-      if (G.mode === 'online') {
-        const fl = combat.flares.slice(-2).map((f) => [f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.vel.y, f.vel.z].map((x) => Math.round(x * 10) / 10));
-        net.send({ t: 'fl', id: G.netId + popId, f: fl });
-      }
+      if (G.mode === 'online') net.send({ t: 'fl', id: G.netId + popId, f: pack(combat.flares.slice(-2)) });
+    }
+  }
+  if (ctl.chaff && plane.chaffCd <= 0 && plane.chaff > 0) {
+    const popId = combat.popChaff(plane);
+    plane.chaff--; plane.chaffCd = 0.3;
+    if (isLocalHuman) {
+      audio.chaff();
+      if (G.mode === 'online') net.send({ t: 'ch', id: G.netId + popId, c: pack(combat.chaff.slice(-1)) });
     }
   }
 }
@@ -331,7 +366,7 @@ function updateCamera(dt) {
     camera.lookAt(G.deathPos);
     return;
   }
-  const target = G.opp && G.opp.alive ? G.opp : null;
+  const target = G.opp && G.opp.alive && (G.opp.pos.distanceTo(P.pos) < VISUAL_RANGE || P.radar.contact) ? G.opp : null;
   const lookBack = input.held('lookBack');
   // desired orientation
   if (G.padlock && target) {
@@ -373,7 +408,7 @@ function planeEffects(plane, jet, dt) {
   jet.group.position.copy(plane.pos);
   jet.group.quaternion.copy(plane.quat);
   jet.setThrottle(plane.eng ?? plane.throttle, G.time);
-  jet.setMissileCount(plane.missiles);
+  jet.setStores(plane.stores);
   if (!plane.alive) return;
   // wingtip vapor under high load
   const g = plane.g ?? 1;
@@ -406,7 +441,7 @@ function frame(now) {
   if (input.tapped('pause') && G.mode) togglePause();
   if (input.tapped('help') && G.mode) $('help').classList.toggle('show');
   if (input.tapped('camera')) { G.camMode = G.camMode === 'chase' ? 'cockpit' : 'chase'; }
-  if (input.tapped('padlock')) { G.padlock = !G.padlock; flash(G.padlock ? 'PADLOCK VIEW ON' : 'PADLOCK VIEW OFF', 1); }
+  if (input.tapped('padlock')) { G.padlock = !G.padlock; flash(G.padlock ? 'PADLOCK / HELMET CUE ON' : 'PADLOCK OFF', 1); }
 
   const inGame = G.mode && G.phase !== 'menu';
   const simRunning = inGame && !(G.paused && G.mode === 'ai');
@@ -435,11 +470,12 @@ function frame(now) {
     if (n !== G.lastBeep && n > 0 && n <= 3) audio.beep(660, 0.12, 0.12);
     G.lastBeep = n;
   } else G.lastBeep = null;
-  const threats = inGame ? combat.threatsTo(P) : [];
-  let td = 1e9; for (const t of threats) td = Math.min(td, t.pos.distanceTo(P.pos));
+  const T = inGame && G.threat ? G.threat : null;
   audio.update(dt, {
+    rwr: T ? { search: T.search, lock: T.lock, launch: T.launch, active: T.active, maws: T.maws } : null,
+    mrmTrack: P.weapon === 'mrm' && P.radar.stt,
     active: inGame && !(G.paused && G.mode === 'ai'), alive: P.alive, eng: P.eng, speed: P.speed, g: P.g,
-    firing: P.firing, locked: P.locked, inCone: P.inCone, lockProgress: P.lockProgress, threatDist: td, cockpit: G.camMode === 'cockpit',
+    firing: P.firing, locked: P.locked, inCone: P.inCone, lockProgress: P.lockProgress, threatDist: T ? T.nearest : 1e9, cockpit: G.camMode === 'cockpit',
     alpha: P.alpha, airbrake: P.airbrake, gloc: P.gloc, pullUp: inGame && G.pullUp,
     opp: inGame && G.opp ? G.opp : null,
   });
@@ -469,7 +505,7 @@ function step(dt, now) {
   let aiOut = null;
   if (G.mode === 'ai' && O) {
     O.prevPos.copy(O.pos);
-    aiOut = G.ai.update(dt, P, combat);
+    aiOut = G.ai.update(dt, P, combat, assessThreats(O, P, combat.missilesFrom(P)));
     aiInput.pitch = aiOut.pitch; aiInput.roll = aiOut.roll; aiInput.yaw = aiOut.yaw;
     aiInput.throttle = aiOut.throttle; aiInput.airbrake = aiOut.airbrake;
   }
@@ -493,12 +529,43 @@ function step(dt, now) {
     } else P.outOfBounds = 0;
   }
 
-  // ---- locks & weapons ----
-  updateLock(P, O, dt);
-  handleWeapons(P, input.held('gun'), input.tapped('missile'), input.held('flare'), O, dt, true);
+  // ---- sensors, weapon selection & weapons ----
+  if (P.alive && !G.paused) {
+    if (input.tapped('selSrm')) { P.weapon = 'srm'; flash(countOf(P.stores, 'srm') ? `SRM — ${WEAPONS[firstOf(P.stores, 'srm')].name}` : 'SRM — none left', 1.2); }
+    if (input.tapped('selMrm')) {
+      if (countOf(P.stores, 'mrm')) { P.weapon = 'mrm'; flash('MRM — AIM-120C', 1.2); }
+      else flash('NO AIM-120 LOADED', 1.2);
+    }
+    if (input.tapped('radarLock')) {
+      P.wantStt = !P.wantStt;
+      flash(P.wantStt ? (P.radar.contact ? 'RADAR LOCKING…' : 'RADAR LOCK — no contact yet') : 'RADAR LOCK OFF', 1.2);
+    }
+  }
+  const hadStt = P.radar.stt;
+  updateRadar(P, O, dt, P.wantStt, combat.chaff);
+  if (hadStt && !P.radar.stt && P.radar.lostMsg > 0) flash(P.radar.notched ? 'LOCK BROKEN — bandit in the notch' : 'LOCK BROKEN', 1.6);
+  if (P.radar.lostMsg > 0) P.radar.lostMsg -= dt;
+  const srmKey = P.weapon === 'srm' ? firstOf(P.stores, 'srm') : null;
+  updateIrLock(P, O, dt, srmKey, (G.padlock && O && O.pos.distanceTo(P.pos) < VISUAL_RANGE) || P.radar.stt);
+  handleWeapons(P, { gun: input.held('gun'), missile: input.tapped('missile'), flare: input.held('flare'), chaff: input.held('chaff') }, O, dt, true);
   if (aiOut) {
-    updateLock(O, P, dt);
-    handleWeapons(O, aiOut.gun, aiOut.missile, aiOut.flare, P, dt, false);
+    O.weapon = aiOut.weapon;
+    updateRadar(O, P, dt, aiOut.wantStt, combat.chaff);
+    updateIrLock(O, P, dt, O.weapon === 'srm' ? firstOf(O.stores, 'srm') : null, O.radar.stt);
+    handleWeapons(O, aiOut, P, dt, false);
+  }
+  G.threat = O ? assessThreats(P, O, combat.missilesFrom(O)) : null;
+  // launch zone for the selected missile, refreshed a few times a second
+  G.dlzT -= dt;
+  if (G.dlzT <= 0) {
+    G.dlzT = 0.25;
+    const key = firstOf(P.stores, P.weapon);
+    if (key && O && O.alive && P.alive) {
+      const rel = O.pos.clone().sub(P.pos), d = rel.length();
+      const closing = -rel.dot(O.vel) / Math.max(d, 1); // target's own speed toward us
+      const zone = launchZone(flyout(key, P.speed, airDensity(P.pos.y)), closing, O.vel.length());
+      G.dlz = { key, ...zone };
+    } else G.dlz = null;
   }
   if (G.mode === 'online' && O && O.alive && O.firing) {
     // remote tracers are visual only — the shooter's client detects hits
@@ -516,7 +583,7 @@ function step(dt, now) {
     if (G.sendT <= 0) {
       G.sendT = 1 / 30;
       const ms = [];
-      for (const m of combat.missiles) if (m.owner === P) ms.push([m.id, ...[m.pos.x, m.pos.y, m.pos.z, m.vel.x, m.vel.y, m.vel.z].map((x) => Math.round(x * 10) / 10)]);
+      for (const m of combat.missiles) if (m.owner === P) ms.push([m.id, ...[m.pos.x, m.pos.y, m.pos.z, m.vel.x, m.vel.y, m.vel.z].map((x) => Math.round(x * 10) / 10), m.w.code, Combat.flags(m)]);
       net.send(packState(P, { m: ms }));
     }
   }
@@ -528,7 +595,11 @@ function drawHud(dt) {
   if (!inGame) { hud.draw({ active: false }, dt); return; }
   const oppAlive = O && O.alive;
   const oppDist = oppAlive ? O.pos.distanceTo(P.pos) : 0;
-  const gunDist = oppAlive ? Math.min(1500, Math.max(300, oppDist)) : 1000;
+  const R = P.radar;
+  // what the pilot actually knows: eyes inside visual range, radar track beyond it
+  const visual = oppAlive && oppDist < VISUAL_RANGE;
+  const tracked = oppAlive && R.contact;
+  const gunDist = oppAlive && (R.stt || oppDist < 2500) ? Math.min(1500, Math.max(300, oppDist)) : 1000;
   const gunPoint = P.pos.clone().addScaledVector(P.fwd, gunDist);
   const vhat = P.vel.clone().normalize();
   const fpmPoint = P.pos.clone().addScaledVector(vhat, 1000);
@@ -541,21 +612,39 @@ function drawHud(dt) {
       leadPoint = P.pos.clone().addScaledVector(dir, oppDist);
     }
   }
-  const threats = combat.threatsTo(P).map((m) => ({ pos: m.pos }));
-  let threatDist = 1e9; for (const t of threats) threatDist = Math.min(threatDist, t.pos.distanceTo(P.pos));
+  const T = G.threat || { list: [], nearest: 1e9 };
   const gh = groundHeight(P.pos.x, P.pos.z);
   const agl = P.pos.y - gh;
   const pullUp = P.vel.y < -5 && agl / -P.vel.y < 6;
   G.pullUp = pullUp && P.alive;
-  const seekerPx = (Math.tan(SEEKER_CONE) / Math.tan((camera.fov * Math.PI) / 360)) * (H / 2);
+  const tanHalf = Math.tan((camera.fov * Math.PI) / 360);
+  const srmKey = firstOf(P.stores, 'srm');
+  const cone = srmKey && P.weapon === 'srm' ? WEAPONS[srmKey].lockCone : 0;
+  const seekerPx = cone ? (Math.tan(cone) / tanHalf) * (H / 2) : 0;
+  // my AIM-120s in flight: time until the seeker goes active, or ACTIVE
+  const myMrm = [];
+  for (const m of combat.missiles) {
+    if (m.owner !== P || m.w.guidance !== 'radar') continue;
+    let status;
+    if (m.lost || m.decoy) status = 'LOST';
+    else if (m.phase === 'active') status = 'ACT';
+    else {
+      const d = m.pos.distanceTo(m.est) - m.w.pitbull;
+      status = (m.phase === 'dl' ? 'DL ' : 'INS ') + Math.max(0, Math.round(d / Math.max(400, m.vel.length() + 250)));
+    }
+    myMrm.push(status);
+  }
   let hint = null;
-  if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · X missile · C flares · T padlock · V view · SHIFT fine aim · H help';
+  if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · 1/2 select AIM-9 / AIM-120 · TAB radar lock · X fire · C flares · Z chaff · H help';
   hud.draw({
     active: true, plane: P, opp: oppAlive ? O : null, oppDist, oppName: G.oppName, myName: (settings.name || 'YOU').toUpperCase(),
+    visual, tracked, radar: R, padlock: G.padlock,
     project, camSpace, camPos: camera.position, gunPoint, fpmPoint, leadPoint, closure,
     lock: { inCone: P.inCone, progress: P.lockProgress, locked: P.locked }, seekerPx,
-    threats, threatDist, agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0,
+    threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm,
+    agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0,
     scores: G.scores, roundsToWin: G.roundsToWin, countdown: G.phase === 'countdown' ? G.phaseT : 0,
+    countdownMsg: G.engage === 'merge' ? 'WEAPONS SAFE — MERGE INBOUND' : 'WEAPONS SAFE — BANDIT 36 KM AHEAD, FIND HIM ON RADAR',
     msg: G.msgT > 0 ? G.msg : '', ping: G.mode === 'online' ? net.rtt : null, hint,
   }, dt);
 }
@@ -597,6 +686,8 @@ function readMenu() {
   settings.rounds = parseInt($('rounds').value, 10) || 3;
   settings.difficulty = $('difficulty').value;
   settings.sound = $('sound').checked;
+  settings.loadout = $('loadout').value;
+  settings.engage = $('engage').value;
   saveSettings();
 }
 function initMenu() {
@@ -605,6 +696,8 @@ function initMenu() {
   $('rounds').value = String(settings.rounds);
   $('difficulty').value = settings.difficulty;
   $('sound').checked = settings.sound;
+  $('loadout').value = settings.loadout;
+  $('engage').value = settings.engage;
   $('btnPractice').onclick = () => { audio.start(); readMenu(); startPractice(); };
   $('btnQuick').onclick = () => online('quick');
   $('btnCreate').onclick = () => online('create');

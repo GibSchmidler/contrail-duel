@@ -5,7 +5,7 @@ const SIZE = 80000;      // terrain extent (m)
 const N = 320;           // grid segments
 const STEP = SIZE / N;
 const HALF = SIZE / 2;
-export const ARENA_RADIUS = 22000;
+export const ARENA_RADIUS = 30000;
 
 function hash(i, j) {
   let h = Math.imul(i, 374761393) ^ Math.imul(j, 668265263);

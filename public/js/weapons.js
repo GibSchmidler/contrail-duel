@@ -1,13 +1,12 @@
-// Guns, IR missiles, flares, seeker lock and hit detection.
+// Gun, missiles (IR and active radar), flares, chaff and hit detection.
 import * as THREE from 'three';
-import { MUZZLE_VEL, GRAV, airDensity } from './flight.js';
+import { MUZZLE_VEL, GRAV, airDensity, bulletDragK } from './flight.js';
 import { buildMissileMesh } from './models.js';
 import { groundHeight } from './world.js';
+import { WEAPONS, WEAPON_BY_CODE, GUN, RADAR } from './arsenal.js';
+import { inNotch, notchFactor } from './sensors.js';
 
-export const GUN_RATE = 100;        // rounds/s
-export const GUN_DAMAGE = 5;
-export const SEEKER_CONE = 0.21;    // rad (~12 deg) launch seeker field of view
-export const LOCK_TIME = 1.0;       // s
+export const GUN_RATE = GUN.rate;
 const MAX_BULLETS = 1400;
 
 // Hitbox capsules in body coordinates (forward = -Z)
@@ -67,35 +66,11 @@ function hitsAircraft(rel0, rel1, quat) {
   return false;
 }
 
-// Infrared signature-based lock range: tail aspect + afterburner = longer range.
-export function lockRange(shooterPos, target) {
-  const toShooter = _r.copy(shooterPos).sub(target.pos).normalize();
-  const aspect = -target.fwd.dot(toShooter); // 1 = looking at target's tailpipe
-  let range = 2300 + (aspect + 1) * 0.5 * 2500;
-  if (target.ab) range *= 1.25;
-  return range;
-}
-
-const _to = new THREE.Vector3();
-// Updates plane.lockProgress / plane.locked for a given target. Returns angle off boresight.
-export function updateLock(plane, target, dt) {
-  if (!target || !target.alive || !plane.alive || plane.missiles <= 0) {
-    plane.lockProgress = 0; plane.locked = false; plane.inCone = false; return 99;
-  }
-  _to.copy(target.pos).sub(plane.pos);
-  const dist = _to.length();
-  _to.divideScalar(dist || 1);
-  const ang = Math.acos(Math.min(1, Math.max(-1, _to.dot(plane.fwd))));
-  plane.inCone = ang < SEEKER_CONE && dist < lockRange(plane.pos, target) && dist > 150;
-  if (plane.inCone) plane.lockProgress = Math.min(1, plane.lockProgress + dt / LOCK_TIME);
-  else plane.lockProgress = Math.max(0, plane.lockProgress - dt * 2.5);
-  plane.locked = plane.lockProgress >= 1;
-  return ang;
-}
-
 // ------------------------------------------------------------------
 const _tmp = new THREE.Vector3(), _tmp2 = new THREE.Vector3(), _los = new THREE.Vector3(), _vr = new THREE.Vector3(), _om = new THREE.Vector3();
-const _acmd = new THREE.Vector3(), _mq = new THREE.Quaternion(), _fz = new THREE.Vector3(0, 0, -1);
+const _acmd = new THREE.Vector3(), _mq = new THREE.Quaternion(), _fz = new THREE.Vector3(0, 0, -1), _aim = new THREE.Vector3();
+const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) * 2; // ~N(0,1)
 
 export class Combat {
   // hooks: onDamage(target, dmg, kind, shooter, pos), onMissileGone(missile, exploded, pos)
@@ -105,9 +80,10 @@ export class Combat {
     this.missiles = [];         // locally simulated
     this.remoteMissiles = new Map();
     this.flares = [];
+    this.chaff = [];
     this.popId = 1;
     this.missileSeq = 1;
-    this.meshPool = [];
+    this.meshPool = {};
 
     // tracer rendering
     this.tracerPos = new Float32Array(MAX_BULLETS * 6);
@@ -128,37 +104,47 @@ export class Combat {
     this.bullets.length = 0;
     for (const m of this.missiles) this.releaseMesh(m.mesh);
     for (const m of this.remoteMissiles.values()) this.releaseMesh(m.mesh);
-    this.missiles.length = 0; this.remoteMissiles.clear(); this.flares.length = 0;
+    this.missiles.length = 0; this.remoteMissiles.clear(); this.flares.length = 0; this.chaff.length = 0;
   }
 
-  getMesh() {
-    const m = this.meshPool.pop() || buildMissileMesh();
+  getMesh(key) {
+    const pool = this.meshPool[key] || (this.meshPool[key] = []);
+    const m = pool.pop() || buildMissileMesh(key);
+    m.userData.key = key;
     m.visible = true; this.scene.add(m);
     return m;
   }
-  releaseMesh(m) { if (!m) return; this.scene.remove(m); this.meshPool.push(m); }
+  releaseMesh(m) { if (!m) return; this.scene.remove(m); (this.meshPool[m.userData.key] || (this.meshPool[m.userData.key] = [])).push(m); }
 
   // live = this client performs hit detection for this bullet
   fireBullet(plane, live, frac = 0) {
     if (this.bullets.length >= MAX_BULLETS) this.bullets.shift();
-    const spread = 0.0028;
     const dir = _tmp.copy(plane.fwd)
-      .addScaledVector(plane.right, (Math.random() - 0.5) * spread)
-      .addScaledVector(plane.up, (Math.random() - 0.5) * spread).normalize();
+      .addScaledVector(plane.right, gauss() * GUN.sigma)
+      .addScaledVector(plane.up, gauss() * GUN.sigma).normalize();
     const p = plane.pos.clone().addScaledVector(plane.fwd, 7).addScaledVector(plane.right, -0.7).addScaledVector(plane.up, 0.35);
     const v = plane.vel.clone().addScaledVector(dir, MUZZLE_VEL);
     p.addScaledVector(v, frac);
     this.bullets.push({ p, v, prev: p.clone(), t: 0, owner: plane, live, tracer: Math.random() < 0.5 });
   }
 
-  launchMissile(plane, target) {
+  launchMissile(plane, target, key, station = 0) {
+    const w = WEAPONS[key];
+    const mount = [[5.35, 0.0, 2.6], [-5.35, 0.0, 2.6], [3.4, -0.55, 1.7], [-3.4, -0.55, 1.7], [2.2, -0.75, 0.6], [-2.2, -0.75, 0.6]][station] || [0, -1.2, 0];
     const m = {
-      id: (plane.netId || 'L') + '-' + this.missileSeq++,
-      owner: plane, target, flareTarget: null, seen: new Set(),
-      pos: plane.pos.clone().addScaledVector(plane.up, -1.2),
-      vel: plane.vel.clone().addScaledVector(plane.fwd, 15).addScaledVector(plane.up, -8),
-      prev: new THREE.Vector3(), t: 0, lost: false, lostT: 0, mesh: this.getMesh(),
+      id: (plane.netId || 'L') + '-' + this.missileSeq++, key, w,
+      owner: plane, target, decoy: null, seen: new Set(),
+      pos: plane.pos.clone().addScaledVector(plane.right, mount[0]).addScaledVector(plane.up, mount[1] - 0.4).addScaledVector(plane.fwd, -mount[2]),
+      vel: plane.vel.clone().addScaledVector(plane.fwd, 12).addScaledVector(plane.up, w.cls === 'mrm' ? -9 : -3),
+      prev: new THREE.Vector3(), t: 0, lost: false, lostT: 0, mesh: this.getMesh(key), burning: true,
+      phase: 'ir', est: new THREE.Vector3(), estVel: new THREE.Vector3(), mem: 0, minDist: 1e9,
     };
+    if (w.guidance === 'radar') {
+      const R = plane.radar;
+      m.phase = R && R.stt ? 'dl' : 'inertial';
+      if (R && R.contact) { m.est.copy(R.pos); m.estVel.copy(R.vel); }
+      else { m.est.copy(plane.pos).addScaledVector(plane.fwd, 15000); m.estVel.set(0, 0, 0); } // "maddog": seeker searches straight ahead
+    }
     m.prev.copy(m.pos);
     this.missiles.push(m);
     return m;
@@ -174,22 +160,30 @@ export class Combat {
     }
     return popId;
   }
+  addFlare(p, v, popId, owner) { this.flares.push({ pos: p, vel: v, t: 0, popId, owner }); }
 
-  addFlare(p, v, popId, owner) {
-    this.flares.push({ pos: p, vel: v, t: 0, popId, owner });
+  // Chaff: a bloom of foil that stops dead in the air (so it has ~zero Doppler).
+  popChaff(plane, popId = this.popId++) {
+    const v = plane.vel.clone().multiplyScalar(0.35).addScaledVector(plane.up, -6 + Math.random() * 3).addScaledVector(plane.right, (Math.random() - 0.5) * 12);
+    this.addChaff(plane.pos.clone().addScaledVector(plane.fwd, 3), v, popId, plane);
+    return popId;
   }
+  addChaff(p, v, popId, owner) { this.chaff.push({ pos: p, vel: v, t: 0, popId, owner }); }
 
-  // Remote missile puppets (data from network)
+  // Remote missile puppets (data from network): [id, x, y, z, vx, vy, vz, code, flags]
   syncRemoteMissiles(list, now) {
     const seen = new Set();
-    for (const [id, x, y, z, vx, vy, vz] of list) {
+    for (const [id, x, y, z, vx, vy, vz, code, flags = 1] of list) {
       seen.add(id);
       let m = this.remoteMissiles.get(id);
       if (!m) {
-        m = { id, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), mesh: this.getMesh(), t: 0, remote: true, snapPos: new THREE.Vector3(), snapT: now };
+        const key = WEAPON_BY_CODE[code] || 'aim9x';
+        m = { id, key, guidance: WEAPONS[key].guidance, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), mesh: this.getMesh(key), t: 0, remote: true, snapPos: new THREE.Vector3(), snapT: now };
         this.remoteMissiles.set(id, m);
       }
       m.snapPos.set(x, y, z); m.vel.set(vx, vy, vz); m.snapT = now;
+      m.burning = !!(flags & 1);
+      m.phase = flags & 2 ? 'active' : flags & 4 ? 'dl' : 'none';
     }
     for (const [id, m] of this.remoteMissiles) {
       if (!seen.has(id)) { this.releaseMesh(m.mesh); this.remoteMissiles.delete(id); }
@@ -202,16 +196,22 @@ export class Combat {
     if (pos) { this.effects.explosion(pos, _tmp.set(0, 0, 0), false); this.audio?.explosion(pos, false); }
   }
 
+  static flags(m) {
+    return (m.burning ? 1 : 0) | (m.phase === 'active' && !m.decoy && !m.lost ? 2 : 0) | (m.phase === 'dl' ? 4 : 0);
+  }
+
   update(dt, planes, now, oneWayMs = 0) {
     const fx = this.effects;
-    // ---- bullets ----
+    // ---- bullets: drag + gravity ----
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       const b = this.bullets[i];
       b.prev.copy(b.p);
+      const sp = b.v.length();
+      b.v.multiplyScalar(1 / (1 + bulletDragK(b.p.y) * sp * dt));
       b.v.y -= GRAV * dt;
       b.p.addScaledVector(b.v, dt);
       b.t += dt;
-      let dead = b.t > 2.6;
+      let dead = b.t > 3.5;
       if (!dead && b.p.y < 2500 && b.p.y < groundHeight(b.p.x, b.p.z)) {
         dead = true;
         if (b.live || Math.random() < 0.3) fx.smoke.emit(b.p.x, groundHeight(b.p.x, b.p.z) + 1, b.p.z, 0, 4, 0, 1.2, 2, 6, [0.6, 0.55, 0.5], [0.6, 0.55, 0.5], 0.5, 1, 0);
@@ -225,7 +225,7 @@ export class Combat {
           if (hitsAircraft(r0, r1, pl.quat)) {
             dead = true;
             fx.spark(b.p, pl.vel);
-            this.hooks.onDamage(pl, GUN_DAMAGE, 'gun', b.owner, b.p);
+            this.hooks.onDamage(pl, GUN.damage, 'gun', b.owner, b.p);
             break;
           }
         }
@@ -242,6 +242,16 @@ export class Combat {
       f.pos.addScaledVector(f.vel, dt);
       fx.flare(f.pos);
       if (f.t > 3.5 || f.pos.y < groundHeight(f.pos.x, f.pos.z)) this.flares.splice(i, 1);
+    }
+    // ---- chaff ----
+    for (let i = this.chaff.length - 1; i >= 0; i--) {
+      const c = this.chaff[i];
+      c.t += dt;
+      c.vel.multiplyScalar(Math.exp(-4 * dt));
+      c.vel.y = Math.max(c.vel.y - 3 * dt, -2.5);
+      c.pos.addScaledVector(c.vel, dt);
+      if (c.t < 1.2) fx.chaff(c.pos, c.t);
+      if (c.t > 6) this.chaff.splice(i, 1);
     }
 
     // ---- local missiles ----
@@ -262,9 +272,7 @@ export class Combat {
       m.pos.copy(m.snapPos).addScaledVector(m.vel, age);
       m.t += dt;
       this.placeMissileMesh(m);
-      // trail interpolated between frames
-      const steps = 3;
-      for (let s = 1; s <= steps; s++) fx.missileTrail(_tmp.copy(prev).lerp(m.pos, s / steps), m.vel, m.vel.lengthSq() > 250000);
+      if (m.burning) for (let s = 1; s <= 3; s++) fx.missileTrail(_tmp.copy(prev).lerp(m.pos, s / 3), m.vel, true, m.key);
     }
 
     this.updateTracers();
@@ -276,94 +284,150 @@ export class Combat {
     if (sp > 1) { _mq.setFromUnitVectors(_fz, _tmp.copy(m.vel).divideScalar(sp)); m.mesh.quaternion.copy(_mq); }
   }
 
+  // Active radar seeker: gimbal, range and the Doppler clutter notch.
+  seekerSees(m, tgt, w) {
+    _tmp2.copy(tgt.pos).sub(m.pos);
+    const d = _tmp2.length();
+    if (d > w.seeker) return false;
+    const sp = Math.max(m.vel.length(), 1);
+    if (_tmp2.dot(m.vel) / (d * sp) < Math.cos(w.gimbal)) return false;
+    return !inNotch(m.pos, tgt);
+  }
+
   // returns null while flying, or {exploded, pos}
   stepMissile(m, dt) {
+    const w = m.w;
     m.t += dt;
     m.prev.copy(m.pos);
     const sp = Math.max(m.vel.length(), 1);
     const vhat = _tmp.copy(m.vel).divideScalar(sp);
-    const burning = m.t < 3.0;
     const rho = airDensity(m.pos.y);
-
-    // ---- seeker / target selection ----
-    let tgtPos = null, tgtVel = null;
+    let thrust = 0, tt = m.t;
+    for (const [acc, d] of w.stages) { if (tt < d) { thrust = acc; break; } tt -= d; }
+    m.burning = thrust > 0;
     const tgt = m.target;
-    if (!m.lost) {
-      if (m.flareTarget) {
-        if (m.flareTarget.t > 3.4) { m.lost = true; }
-        else { tgtPos = m.flareTarget.pos; tgtVel = m.flareTarget.vel; }
-      } else if (tgt && tgt.alive) {
-        tgtPos = tgt.pos; tgtVel = tgt.vel;
-        // flare seduction: each new pop near the target gets one roll
-        for (const f of this.flares) {
-          if (f.owner !== tgt || m.seen.has(f.popId) || f.t > 0.6) continue;
-          m.seen.add(f.popId);
-          let chance = 0.45;
-          if (tgt.ab) chance *= 0.55;
-          if ((tgt.throttle ?? 1) < 0.6) chance *= 1.5;
-          // a missile looking at the target's hot tailpipe from behind is harder to fool
-          const aspect = -tgt.fwd.dot(_los.copy(m.pos).sub(tgt.pos).normalize());
-          chance *= 1 - aspect * 0.25;
-          if (Math.random() < Math.min(0.85, chance)) { m.flareTarget = f; tgtPos = f.pos; tgtVel = f.vel; break; }
-        }
-      } else m.lost = true;
-    }
+    let aimPos = null, aimVel = null, loft = 0;
 
-    if (tgtPos) {
-      _los.copy(tgtPos).sub(m.pos);
-      const dist = _los.length();
-      const losHat = _tmp2.copy(_los).divideScalar(dist);
-      // gimbal limit / seeker range
-      if (losHat.dot(vhat) < Math.cos(0.95) || dist > 7000) { m.lost = true; tgtPos = null; }
-      else {
-        _vr.copy(tgtVel).sub(m.vel);
-        _om.crossVectors(_los, _vr).divideScalar(dist * dist);           // LOS rate vector
-        const vc = Math.max(-_vr.dot(losHat), 150);
-        _acmd.crossVectors(_om, losHat).multiplyScalar(4 * vc);            // PN, N=4
-        _acmd.y += GRAV;                                                   // gravity bias
-        _acmd.addScaledVector(vhat, -_acmd.dot(vhat));
-        const maxA = 32 * GRAV * Math.min(1, rho / 0.6);
-        const aLen = _acmd.length();
-        if (aLen > maxA) _acmd.multiplyScalar(maxA / aLen);
+    if (w.guidance === 'ir') {
+      // ---- infrared: tracks the hottest thing in view; flares can steal it ----
+      if (!m.lost) {
+        if (m.decoy) {
+          if (m.decoy.t > 3.4) m.lost = true;
+          else { aimPos = m.decoy.pos; aimVel = m.decoy.vel; }
+        } else if (tgt && tgt.alive) {
+          aimPos = tgt.pos; aimVel = tgt.vel;
+          for (const f of this.flares) {
+            if (f.owner !== tgt || m.seen.has(f.popId) || f.t > 0.6) continue;
+            m.seen.add(f.popId);
+            let chance = 0.5;
+            if (tgt.ab) chance *= 0.55;                       // afterburner plume outshines the flare
+            if ((tgt.throttle ?? 1) < 0.6) chance *= 1.5;    // engine at idle: the flare is the brightest thing
+            const aspect = -tgt.fwd.dot(_los.copy(m.pos).sub(tgt.pos).normalize());
+            chance *= 1 - aspect * 0.25;                       // looking up the tailpipe is harder to fool
+            chance *= 1 - w.ccm;                               // counter-countermeasures (imaging seeker on the 9X)
+            if (Math.random() < Math.min(0.85, chance)) { m.decoy = f; aimPos = f.pos; aimVel = f.vel; break; }
+          }
+        } else m.lost = true;
       }
+      if (aimPos) {
+        _los.copy(aimPos).sub(m.pos);
+        const d = _los.length();
+        if (_los.dot(vhat) / d < Math.cos(w.gimbal) || d > w.seeker) { m.lost = true; aimPos = null; }
+      }
+    } else {
+      // ---- active radar (AIM-120): datalink/inertial midcourse, then its own seeker ----
+      if (m.phase === 'active') {
+        if (m.decoy) {
+          if (m.decoy.t > 4) m.lost = true;
+          else { aimPos = m.decoy.pos; aimVel = m.decoy.vel; }
+        } else if (tgt && tgt.alive && this.seekerSees(m, tgt, w)) {
+          m.est.copy(tgt.pos); m.estVel.copy(tgt.vel); m.mem = 1.5;
+          aimPos = tgt.pos; aimVel = tgt.vel;
+          for (const c of this.chaff) {
+            if (c.owner !== tgt || m.seen.has(c.popId) || c.t > 1.0) continue;
+            m.seen.add(c.popId);
+            const nf = notchFactor(m.pos, tgt);
+            const chance = (1 - w.ccm) * 0.7 * nf * nf * nf; // Doppler gate rejects chaff unless the target is beaming
+            if (Math.random() < chance) { m.decoy = c; aimPos = c.pos; aimVel = c.vel; break; }
+          }
+        } else {
+          // track lost (notch, gimbal): coast on memory and keep searching; re-acquire when it reappears
+          m.mem -= dt; m.est.addScaledVector(m.estVel, dt);
+          aimPos = m.est; aimVel = m.estVel;
+          if (m.mem < -2.5) m.lost = true;
+        }
+      } else {
+        // datalink: updates flow whenever the launching jet holds a radar lock (and resume if it re-locks)
+        const o = m.owner;
+        if (o && o.alive && o.radar && o.radar.stt && tgt && tgt.alive) { m.phase = 'dl'; m.est.copy(tgt.pos); m.estVel.copy(tgt.vel); }
+        else m.phase = 'inertial';
+        if (m.phase !== 'dl') m.est.addScaledVector(m.estVel, dt);
+        const dEst = m.pos.distanceTo(m.est);
+        if (dEst < w.pitbull && tgt && tgt.alive && tgt.pos.distanceTo(m.est) < 4000 && this.seekerSees(m, tgt, w)) {
+          m.phase = 'active'; m.mem = 1.5;   // "pitbull": autonomous from here
+        }
+        m.minDist = Math.min(m.minDist, dEst);
+        if (m.phase !== 'active' && dEst > m.minDist + 1500 && m.minDist < w.pitbull) m.lost = true; // flew through an empty basket
+        aimPos = m.est; aimVel = m.estVel;
+        if (dEst > 12000 && m.t > 1.5) loft = clamp((dEst - 12000) / 14000, 0, 1);
+      }
+      if (m.lost) aimPos = null;
     }
-    if (!tgtPos) _acmd.set(0, 0, 0);
 
-    // ---- dynamics ----
-    const thrust = burning ? 260 : 0;
-    const dragA = 6.5e-5 * rho * sp * sp + _acmd.length() * 0.07;
-    m.vel.addScaledVector(_acmd, dt)
-      .addScaledVector(vhat, (thrust - dragA) * dt);
+    if (aimPos) {
+      _los.copy(aimPos).sub(m.pos);
+      const dist = Math.max(_los.length(), 1);
+      const losHat = _tmp2.copy(_los).divideScalar(dist);
+      _vr.copy(aimVel).sub(m.vel);
+      _om.crossVectors(_los, _vr).divideScalar(dist * dist);           // LOS rate vector
+      const vc = Math.max(-_vr.dot(losHat), 150);
+      _acmd.crossVectors(_om, losHat).multiplyScalar(4 * vc);            // proportional navigation, N = 4
+      const off = Math.acos(clamp(losHat.dot(vhat), -1, 1));
+      if (off > 0.25) _acmd.addScaledVector(_aim.copy(losHat).addScaledVector(vhat, -losHat.dot(vhat)).normalize(), off * 120); // turn toward an off-boresight target
+      _acmd.y += GRAV;                                                   // gravity bias
+      if (loft > 0 && vhat.y < 0.45) _acmd.y += loft * 45;               // loft into thin air on long shots
+      _acmd.addScaledVector(vhat, -_acmd.dot(vhat));
+      const q = 0.5 * rho * sp * sp;
+      let maxA = w.maxG * GRAV * Math.min(1, q / 160000);               // fin authority scales with dynamic pressure
+      if (w.tv && m.burning) maxA = Math.max(maxA, w.maxG * GRAV * 0.7); // thrust vectoring works at any speed while burning
+      if (m.t < 0.25) maxA *= 0.3;                                       // clear the aircraft first
+      const aLen = _acmd.length();
+      if (aLen > maxA) _acmd.multiplyScalar(maxA / aLen);
+    } else _acmd.set(0, 0, 0);
+
+    // ---- dynamics: thrust, drag (incl. induced drag from manoeuvring), gravity ----
+    const dragA = w.cdA * rho * sp * sp + _acmd.length() * 0.06;
+    m.vel.addScaledVector(_acmd, dt).addScaledVector(vhat, (thrust - dragA) * dt);
     m.vel.y -= GRAV * dt;
     m.pos.addScaledVector(m.vel, dt);
 
     this.placeMissileMesh(m);
-    const steps = 3;
-    for (let s = 1; s <= steps; s++) this.effects.missileTrail(_tmp2.copy(m.prev).lerp(m.pos, s / steps), m.vel, burning);
+    if (m.burning) for (let s = 1; s <= 3; s++) this.effects.missileTrail(_tmp2.copy(m.prev).lerp(m.pos, s / 3), m.vel, true, m.key);
 
-    // ---- fuze ----
-    if (tgt && tgt.alive && m.t > 0.4) {
+    // ---- proximity fuze ----
+    if (tgt && tgt.alive && m.t > w.armT) {
       const r0 = _tmp.copy(m.prev).sub(tgt.prevPos);
       const r1 = _tmp2.copy(m.pos).sub(tgt.pos);
       const info = {};
       const d = pointSegDist(r0, r1, info);
-      if (d < 14) {
+      if (d < w.fuze) {
         const pos = m.prev.clone().lerp(m.pos, info.t);
-        const dmg = d < 5 ? 100 : Math.max(25, 100 - (d - 5) * 8);
+        const core = w.fuze * 0.4;
+        const dmg = d < core ? w.dmg : Math.max(20, w.dmg * (1 - 0.75 * (d - core) / (w.fuze - core)));
         this.effects.explosion(pos, tgt.vel, false);
         this.audio?.explosion(pos, false);
         this.hooks.onDamage(tgt, dmg, 'msl', m.owner, pos);
         return { exploded: true, pos };
       }
     }
-    if (m.flareTarget && m.pos.distanceTo(m.flareTarget.pos) < 10) m.lost = true;
+    if (m.decoy && m.pos.distanceTo(m.decoy.pos) < 12) m.lost = true;
     if (m.pos.y < groundHeight(m.pos.x, m.pos.z)) {
       this.effects.explosion(m.pos, _tmp.set(0, 0, 0), false);
       return { exploded: true, pos: m.pos.clone() };
     }
     if (m.lost) m.lostT += dt;
-    if (m.t > 16 || m.lostT > 2.5 || (!burning && sp < 260)) {
-      this.effects.explosion(m.pos, m.vel, false);
+    if (m.t > w.tMax || m.lostT > 3 || (!m.burning && sp < w.vMin)) {
+      this.effects.explosion(m.pos, m.vel, false);   // self-destruct
       this.audio?.explosion(m.pos, false);
       return { exploded: true, pos: m.pos.clone() };
     }
@@ -379,7 +443,7 @@ export class Combat {
       const k = 0.022;
       this.tracerPos[o] = p.x; this.tracerPos[o + 1] = p.y; this.tracerPos[o + 2] = p.z;
       this.tracerPos[o + 3] = p.x - b.v.x * k; this.tracerPos[o + 4] = p.y - b.v.y * k; this.tracerPos[o + 5] = p.z - b.v.z * k;
-      const fade = Math.max(0, 1 - b.t / 2.6);
+      const fade = Math.max(0, 1 - b.t / 3.5);
       this.tracerCol[o] = 1.0 * fade; this.tracerCol[o + 1] = 0.85 * fade; this.tracerCol[o + 2] = 0.45 * fade;
       this.tracerCol[o + 3] = 0.6 * fade; this.tracerCol[o + 4] = 0.25 * fade; this.tracerCol[o + 5] = 0.05 * fade;
       n++;
@@ -388,11 +452,18 @@ export class Combat {
     this.tracerAttr.needsUpdate = true; this.tracerColAttr.needsUpdate = true;
   }
 
-  // Missiles (local or remote) heading for `plane`, for warnings.
-  threatsTo(plane) {
+  // Missiles fired by `owner` (local sim or network puppets), in the form sensors.assessThreats wants.
+  missilesFrom(owner) {
     const out = [];
-    for (const m of this.missiles) if (m.target === plane && !m.lost && !m.flareTarget) out.push(m);
-    if (plane && !plane.isRemote) for (const m of this.remoteMissiles.values()) out.push(m);
+    if (!owner) return out;
+    if (owner.isRemote) {
+      for (const m of this.remoteMissiles.values()) out.push(m);
+    } else {
+      for (const m of this.missiles) {
+        if (m.owner !== owner) continue;
+        out.push({ pos: m.pos, vel: m.vel, guidance: m.w.guidance, burning: m.burning, phase: m.decoy || m.lost ? 'none' : m.phase, src: m });
+      }
+    }
     return out;
   }
 }

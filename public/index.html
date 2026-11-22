@@ -24,6 +24,20 @@
           <label>First to
             <select id="rounds"><option value="1">1 kill</option><option value="3">3 kills</option><option value="5">5 kills</option><option value="7">7 kills</option></select>
           </label>
+          <label>Loadout
+            <select id="loadout">
+              <option value="balanced">Balanced — 2× AIM-120C, 2× AIM-9X</option>
+              <option value="bvr">Long range — 4× AIM-120C, 2× AIM-9X (heavier)</option>
+              <option value="knife">Knife fight — 4× AIM-9X (lightest)</option>
+              <option value="classic">Old school — 6× AIM-9M</option>
+            </select>
+          </label>
+          <label>Start
+            <select id="engage">
+              <option value="bvr">Beyond visual range — 36 km apart</option>
+              <option value="merge">Merge — 7 km apart, straight to the dogfight</option>
+            </select>
+          </label>
           <label class="check"><input type="checkbox" id="invert"> W pulls the nose up (unchecked = flight-stick style, S pulls up)</label>
           <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
           <button id="btnMenuHelp" class="ghost">Controls &amp; tips</button>
@@ -97,9 +111,11 @@
           <tr><td><kbd>R</kbd>/<kbd>F</kbd></td><td>Throttle up / down (above 100% = afterburner)</td></tr>
           <tr><td><kbd>B</kbd> (hold)</td><td>Airbrake</td></tr>
           <tr><td><kbd>Space</kbd></td><td>Cannon</td></tr>
-          <tr><td><kbd>X</kbd></td><td>Fire IR missile (needs lock)</td></tr>
-          <tr><td><kbd>C</kbd></td><td>Flares</td></tr>
-          <tr><td><kbd>T</kbd></td><td>Padlock camera (keeps the bandit in view)</td></tr>
+          <tr><td><kbd>1</kbd> · <kbd>2</kbd></td><td>Select Sidewinder (IR) · AMRAAM (radar)</td></tr>
+          <tr><td><kbd>Tab</kbd> or <kbd>L</kbd></td><td>Radar lock on / off (single-target track)</td></tr>
+          <tr><td><kbd>X</kbd></td><td>Fire selected missile</td></tr>
+          <tr><td><kbd>C</kbd> · <kbd>Z</kbd></td><td>Flares (vs IR) · Chaff (vs radar)</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Padlock / helmet cue (keeps the bandit in view)</td></tr>
           <tr><td><kbd>G</kbd> (hold)</td><td>Look back</td></tr>
           <tr><td><kbd>V</kbd></td><td>Chase / cockpit view</td></tr>
           <tr><td><kbd>Esc</kbd> · <kbd>H</kbd></td><td>Pause · this help</td></tr>
@@ -109,10 +125,15 @@
           <p>The jet is fly-by-wire: holding pull commands up to 10 G, limited by angle of attack. Hard turns bleed speed fast. You turn tightest and fastest at <b>corner speed</b>, about 320 kts at the start altitude and lower nearer the ground. The <b>blue caret</b> on the speed tape marks it. Faster than that you're G-limited and the circle gets wide, so use the airbrake (<kbd>B</kbd>) to slow down before a hard turn. Trade altitude for speed by diving, and use the afterburner to recover energy.</p>
           <p>Pulling above 7.5 G fills the <b>G-STRESS</b> bar (about 8 s at full pull), and when it's full you black out briefly. Ease off to recover.</p>
           <h3>Guns</h3>
-          <p>Put the gun cross on the <b>lead pipper</b> (the circle with a dot) to hit. The arc around it shows range, and the cannon is effective inside about 1,200 m. Hold <kbd>Shift</kbd> for fine corrections.</p>
+          <p>M61 cannon: 511 rounds at 100 per second, so you have about 5 seconds of fire. The barrels take a moment to spin up. Rounds slow down with drag and spread a little, so the gun is only effective inside about 1,000 m. Put the gun cross on the <b>lead pipper</b> (the circle with a dot). Hold <kbd>Shift</kbd> for fine corrections.</p>
+          <h3>Sensors</h3>
+          <p>You only know what your sensors tell you. Your <b>radar</b> (the fan at the bottom) sees ±60° off the nose out to about 40 km. Beyond 8 km you need it to find the bandit, and a radar track draws the box on the HUD. <kbd>Tab</kbd> locks it (STT). A lock gives your AMRAAM datalink updates, but the bandit's <b>RWR</b> warns them that you're locked on.</p>
+          <p>Radars filter out ground clutter, so a jet that is below you and flying across your line of sight (<b>beaming</b>, about 90° to you) disappears into the <b>notch</b>. Use it to break locks and defeat radar missiles. The <b>RWR</b> circle shows radars painting you (F) and active missiles (M). The missile warning only detects a burning rocket motor within about 5 km, so a Sidewinder that has burned out is silent.</p>
           <h3>Missiles</h3>
-          <p>Keep the bandit inside the dashed seeker circle until the tone goes steady and you see <b>LOCK</b>. Lock range is much longer from behind (hot tailpipe) and when the bandit is in afterburner.</p>
-          <p>When <b>MISSILE</b> flashes, turn so the missile is off your wing (beam it), pop flares, and cut the afterburner. Missiles lose energy in hard turns.</p>
+          <p><b>AIM-9 Sidewinder (Fox 2)</b> is infrared. Press <kbd>1</kbd> and keep the bandit in the seeker circle until the tone goes steady. Lock range is longest from behind and when the bandit is in afterburner. The <b>9X</b> can lock far off the nose with the helmet (padlock view <kbd>T</kbd>) or a radar lock, turns harder, and ignores most flares. The <b>9M</b> needs the bandit near the nose and is easier to decoy.</p>
+          <p><b>AIM-120 AMRAAM (Fox 3)</b> is active radar. Press <kbd>2</kbd>; it needs a radar track. With a lock it receives datalink updates; without one it flies to where the bandit was. About 9 km from the target its own radar goes active ("pitbull") and it's on its own. The scale right of the altitude shows its launch zone: <b>IN RNG</b> means it can reach a target holding course, and <b>SHOOT</b> means no escape even if they turn and run.</p>
+          <h3>Defending</h3>
+          <p><b>Against IR:</b> turn the missile onto your wing, pop flares (<kbd>C</kbd>) and come out of afterburner. <b>Against radar:</b> beam it and get below it so you sit in the notch, then drop chaff (<kbd>Z</kbd>). Chaff works best when you're beaming. Every missile runs out of energy, so turning hard or running away makes it fall short.</p>
         </div>
       </div>
       <button id="btnHelpClose" class="primary">Close (H)</button>

@@ -99,6 +99,11 @@ export class Audio {
     this.warn.connect(this.filter('lowpass', 2400, 0.7)).connect(this.warnG).connect(this.master);
     this.warnT = 0; this.warnIdx = -1;
     this.gpwT = 0;
+    // RWR lock tone (separate voice so it can sit under the missile warning)
+    this.rwrOsc = this.osc('square', 820);
+    this.rwrG = this.gain(0);
+    this.rwrOsc.connect(this.filter('lowpass', 1800, 0.7)).connect(this.rwrG).connect(this.master);
+    this.rwrT = 0; this.prevSearch = false; this.prevStt = false;
 
     // ---------- pilot: strained breathing at high G + heartbeat near blackout ----------
     this.strainG = this.gain(0);
@@ -263,10 +268,24 @@ export class Audio {
       this.set(this.toneVibD.gain, 25); this.set(this.growlD.gain, 0.8 - s.lockProgress * 0.5);
     } else this.set(this.toneG.gain, 0, 0.03);
 
-    // warnings: missile launch warning (alternating two-tone, faster when close), then ground proximity
+    // RWR: chirp when a radar first paints us, warbling tone while locked
+    const rw = s.rwr || {};
+    if (live && rw.search && !this.prevSearch) { this.beep(1900, 0.05, 0.06); this.tn(this.master, t + 0.09, 0.05, { type: 'triangle', f0: 1900, g0: 0.06 }); }
+    this.prevSearch = live && !!rw.search;
+    if (live && rw.lock) {
+      this.rwrT += dt;
+      const ph = this.rwrT % 0.5;
+      this.rwrOsc.frequency.setTargetAtTime(ph < 0.25 ? 820 : 760, t, 0.01);
+      this.set(this.rwrG.gain, 0.035, 0.01);
+    } else { this.rwrT = 0; this.set(this.rwrG.gain, 0, 0.02); }
+    // own radar going to single-target track
+    if (live && s.mrmTrack && !this.prevStt) this.tn(this.master, t, 0.12, { type: 'sine', f0: 1500, f1: 2100, g0: 0.07 });
+    this.prevStt = live && !!s.mrmTrack;
+
+    // warnings: missile warning (alternating two-tone, faster when close), then ground proximity
     const td = s.threatDist ?? 1e9;
-    if (live && td < 6000) {
-      const period = td < 1500 ? 0.1 : td < 3000 ? 0.18 : 0.32;
+    if (live && (td < 9000 || rw.launch)) {
+      const period = td < 1500 ? 0.1 : td < 3000 ? 0.18 : rw.launch && td > 9000 ? 0.25 : 0.32;
       this.warnT += dt;
       const idx = Math.floor(this.warnT / period);
       if (idx !== this.warnIdx) {
@@ -368,6 +387,12 @@ export class Audio {
     this.tn(o, t, 0.25, { f0: 120, f1: 50, g0: 0.5 });
     this.nz(o, t, 3.0, { buf: this.pink, type: 'bandpass', f0: 1600, f1: 280, q: 0.9, g0: 0.9, attack: 0.05 }); // receding motor
     this.nz(o, t, 2.4, { buf: this.brown, f0: 700, f1: 120, g0: 0.6, attack: 0.04 });
+  }
+  chaff() {
+    if (!this.ctx || !this.enabled) return;
+    const t = this.ctx.currentTime;
+    this.tn(this.master, t, 0.05, { f0: 260, f1: 90, g0: 0.25 });
+    this.nz(this.master, t + 0.01, 0.4, { buf: this.pink, type: 'bandpass', f0: 3000, f1: 6000, q: 0.6, g0: 0.09, attack: 0.01 });
   }
   flare() {
     if (!this.ctx || !this.enabled) return;

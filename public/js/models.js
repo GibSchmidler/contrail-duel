@@ -9,26 +9,34 @@ function extrudeShape(pts, depth) {
   return new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false });
 }
 
-export function buildMissileMesh() {
+// Missile meshes by type: AIM-9M (canards), AIM-9X (slim, tiny fins), AIM-120 (bigger, mid-body wings).
+const MSL = {
+  aim9m:  { len: 2.87, r: 0.064, tail: [0.42, 0.3], mid: null, canard: [0.36, 0.2], nose: 0x2a2a2a, band: 0xd8b400 },
+  aim9x:  { len: 3.02, r: 0.064, tail: [0.3, 0.22], mid: null, canard: [0.12, 0.08], nose: 0x7a6a3a, band: 0xd8b400 },
+  aim120: { len: 3.66, r: 0.089, tail: [0.42, 0.32], mid: [0.32, 0.5], canard: null, nose: 0xd8d8d0, band: 0xd8b400 },
+};
+export function buildMissileMesh(key = 'aim9x') {
+  const d = MSL[key] || MSL.aim9x;
   const g = new THREE.Group();
-  const white = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.5, metalness: 0.2 });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.6 });
-  const body = new THREE.CylinderGeometry(0.13, 0.13, 2.9, 8); body.rotateX(Math.PI / 2);
+  const white = new THREE.MeshStandardMaterial({ color: 0xe6e6e2, roughness: 0.5, metalness: 0.2 });
+  const nose = new THREE.MeshStandardMaterial({ color: d.nose, roughness: 0.4, metalness: 0.3 });
+  const band = new THREE.MeshStandardMaterial({ color: d.band, roughness: 0.5 });
+  const R = d.r * 1.7, L = d.len; // slightly oversized so they read at a distance
+  const body = new THREE.CylinderGeometry(R, R, L, 8); body.rotateX(Math.PI / 2);
   g.add(new THREE.Mesh(body, white));
-  const nose = new THREE.ConeGeometry(0.13, 0.35, 8); nose.rotateX(-Math.PI / 2); nose.translate(0, 0, -1.62);
-  g.add(new THREE.Mesh(nose, dark));
-  for (let i = 0; i < 4; i++) {
-    const fin = new THREE.BoxGeometry(0.02, 0.5, 0.35);
-    fin.translate(0, 0.28, 1.2);
-    const m = new THREE.Mesh(fin, white);
-    m.rotation.z = (i * Math.PI) / 2 + Math.PI / 4;
-    g.add(m);
-    const cf = new THREE.BoxGeometry(0.02, 0.3, 0.2);
-    cf.translate(0, 0.2, -0.9);
-    const m2 = new THREE.Mesh(cf, white);
-    m2.rotation.z = (i * Math.PI) / 2 + Math.PI / 4;
-    g.add(m2);
-  }
+  const cone = new THREE.ConeGeometry(R, key === 'aim120' ? 0.55 : 0.32, 8); cone.rotateX(-Math.PI / 2); cone.translate(0, 0, -L / 2 - (key === 'aim120' ? 0.27 : 0.16));
+  g.add(new THREE.Mesh(cone, nose));
+  const bandG = new THREE.CylinderGeometry(R * 1.02, R * 1.02, 0.08, 8); bandG.rotateX(Math.PI / 2); bandG.translate(0, 0, -L * 0.18);
+  g.add(new THREE.Mesh(bandG, band));
+  const fins = (span, chord, z) => {
+    for (let i = 0; i < 4; i++) {
+      const f = new THREE.BoxGeometry(0.02, span, chord); f.translate(0, R + span / 2, z);
+      const m = new THREE.Mesh(f, white); m.rotation.z = (i * Math.PI) / 2 + Math.PI / 4; g.add(m);
+    }
+  };
+  fins(d.tail[0], d.tail[1], L / 2 - d.tail[1] / 2);
+  if (d.mid) fins(d.mid[0], d.mid[1], -0.15);
+  if (d.canard) fins(d.canard[0], d.canard[1], -L / 2 + 0.35);
   return g;
 }
 
@@ -110,21 +118,23 @@ export function buildJet(scheme) {
   flameGroup.add(disc);
   g.add(flameGroup);
 
-  // missiles on hardpoints: wingtips then inner pylons
-  const missiles = [];
-  const mounts = [[5.35, 0.0, 2.6], [-5.35, 0.0, 2.6], [3.2, -0.5, 1.6], [-3.2, -0.5, 1.6]];
-  for (const [x, y, z] of mounts) {
-    const m = buildMissileMesh();
-    m.position.set(x, y, z);
-    g.add(m);
-    missiles.push(m);
-  }
-
+  // stores: each station holds one mesh per missile type, shown to match the loadout
+  const mounts = [[5.35, 0.0, 2.6], [-5.35, 0.0, 2.6], [3.4, -0.55, 1.7], [-3.4, -0.55, 1.7], [2.2, -0.75, 0.6], [-2.2, -0.75, 0.6]];
+  const pylonMat = new THREE.MeshStandardMaterial({ color: scheme.body, roughness: 0.6, metalness: 0.3, flatShading: true });
+  const stations = mounts.map(([x, y, z], i) => {
+    const st = {};
+    for (const key of ['aim9m', 'aim9x', 'aim120']) {
+      const m = buildMissileMesh(key);
+      m.position.set(x, y - (i >= 2 ? 0.25 : 0), z + (key === 'aim120' ? -0.3 : 0));
+      m.visible = false; g.add(m); st[key] = m;
+    }
+    if (i >= 2) { const py = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.35, 1.6), pylonMat); py.position.set(x, y + 0.05, z); g.add(py); }
+    return st;
+  });
   g.traverse((o) => { o.frustumCulled = true; });
   return {
-    group: g, flame: flameGroup, flameOuter: outerMat, flameInner: innerMat, flameDisc: glowMat, missiles,
-    // order missiles are fired in (alternate sides)
-    setMissileCount(n) { const order = [2, 3, 0, 1]; for (let i = 0; i < 4; i++) missiles[order[i]].visible = i >= 4 - n; },
+    group: g, flame: flameGroup, flameOuter: outerMat, flameInner: innerMat, flameDisc: glowMat,
+    setStores(stores) { stations.forEach((st, i) => { for (const k in st) st[k].visible = !!stores && stores[i] === k; }); },
     setThrottle(eng, t) {
       const ab = Math.max(0, (eng - 1) / 0.2);
       const flick = 0.9 + 0.1 * Math.sin(t * 60) + 0.05 * Math.sin(t * 97);
