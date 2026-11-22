@@ -93,7 +93,7 @@ const combat = new Combat(scene, effects, audio, {
 function applyDamage(plane, dmg, kind) {
   if (!plane.alive) return;
   plane.hp -= dmg;
-  if (plane === G.me) hud.damageT = Math.min(0.5, hud.damageT + (kind === 'msl' ? 0.5 : 0.12));
+  if (plane === G.me) { hud.damageT = Math.min(0.5, hud.damageT + (kind === 'msl' ? 0.5 : 0.12)); audio.damage(kind); }
   if (plane.hp <= 0) killPlane(plane, kind);
 }
 
@@ -130,7 +130,7 @@ function sendPhase() {
 
 function setPhase(ph, t = 0) {
   G.phase = ph; G.phaseT = t;
-  if (ph === 'fight') { hud.showBanner('FIGHT!', '', '#9dffb8', 1.4); }
+  if (ph === 'fight') { hud.showBanner('FIGHT!', '', '#9dffb8', 1.4); audio.beep(1320, 0.45, 0.14); }
   if (ph === 'matchEnd') showEnd();
 }
 
@@ -145,9 +145,9 @@ function startRound() {
   combat.clear();
   effects.clear();
   const mySide = G.mode === 'online' && G.role === 'guest' ? 1 : 0;
-  G.me.reset(SPAWN[mySide].pos, SPAWN[mySide].quat, 240);
+  G.me.reset(SPAWN[mySide].pos, SPAWN[mySide].quat, 210);
   if (G.mode === 'ai') {
-    G.opp.reset(SPAWN[1 - mySide].pos, SPAWN[1 - mySide].quat, 240);
+    G.opp.reset(SPAWN[1 - mySide].pos, SPAWN[1 - mySide].quat, 210);
     G.ai.reset();
   } else if (G.opp) {
     G.opp.hardReset(); G.opp.alive = true; G.opp.hp = 100;
@@ -294,7 +294,7 @@ function handleWeapons(plane, wantGun, wantMissile, wantFlare, target, dt, isLoc
     else {
       combat.launchMissile(plane, target);
       plane.missiles--; plane.missileCd = 0.8; plane.lockProgress = 0.6;
-      if (isLocalHuman || (G.me.pos.distanceTo(plane.pos) < 3000)) audio.launch();
+      audio.launch(isLocalHuman ? null : plane.pos);
     }
   }
   if (wantFlare && plane.flareCd <= 0 && plane.flares > 0) {
@@ -427,12 +427,21 @@ function frame(now) {
 
   drawHud(dt);
   audio.listenerPos = camera.position;
+  audio.listenerQuat = camera.quaternion;
   const P = G.me;
+  audio.listenerVel = P.alive ? P.vel : null;
+  if (inGame && G.phase === 'countdown') {
+    const n = Math.ceil(G.phaseT);
+    if (n !== G.lastBeep && n > 0 && n <= 3) audio.beep(660, 0.12, 0.12);
+    G.lastBeep = n;
+  } else G.lastBeep = null;
   const threats = inGame ? combat.threatsTo(P) : [];
   let td = 1e9; for (const t of threats) td = Math.min(td, t.pos.distanceTo(P.pos));
   audio.update(dt, {
     active: inGame && !(G.paused && G.mode === 'ai'), alive: P.alive, eng: P.eng, speed: P.speed, g: P.g,
     firing: P.firing, locked: P.locked, inCone: P.inCone, lockProgress: P.lockProgress, threatDist: td, cockpit: G.camMode === 'cockpit',
+    alpha: P.alpha, airbrake: P.airbrake, gloc: P.gloc, pullUp: inGame && G.pullUp,
+    opp: inGame && G.opp ? G.opp : null,
   });
 
   renderer.render(scene, camera);
@@ -537,6 +546,7 @@ function drawHud(dt) {
   const gh = groundHeight(P.pos.x, P.pos.z);
   const agl = P.pos.y - gh;
   const pullUp = P.vel.y < -5 && agl / -P.vel.y < 6;
+  G.pullUp = pullUp && P.alive;
   const seekerPx = (Math.tan(SEEKER_CONE) / Math.tan((camera.fov * Math.PI) / 360)) * (H / 2);
   let hint = null;
   if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · X missile · C flares · T padlock · V view · SHIFT fine aim · H help';
@@ -625,4 +635,4 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera };
+window.__game = { G, combat, camera, audio };

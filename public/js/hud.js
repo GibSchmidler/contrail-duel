@@ -1,5 +1,6 @@
 // 2D canvas HUD drawn over the 3D view.
 import * as THREE from 'three';
+import { JET, GRAV, airDensity, liftCoef } from './flight.js';
 
 const GREEN = '#9dffb8';
 const RED = '#ff5a4a';
@@ -135,6 +136,11 @@ export class Hud {
       const y = cy + (kts - k) * pxPerKt;
       c.beginPath(); c.moveTo(lx, y); c.lineTo(lx + (k % 50 === 0 ? 14 : 7) * sc, y); c.stroke();
     }
+    // corner-speed caret: slowest speed that still reaches max G = tightest, fastest turn
+    const cornerKts = Math.sqrt((2 * JET.gMax * JET.mass * GRAV) / (airDensity(P.pos.y) * JET.S * liftCoef(JET.aStall))) * 1.944;
+    const ccy = cy + Math.max(-114 * sc, Math.min(114 * sc, (kts - cornerKts) * pxPerKt)); // pinned to the tape edge when off-scale
+    c.fillStyle = Math.abs(kts - cornerKts) < 25 ? '#7fe8ff' : 'rgba(127,232,255,0.6)';
+    c.beginPath(); c.moveTo(lx + 24 * sc, ccy - 6 * sc); c.lineTo(lx + 15 * sc, ccy); c.lineTo(lx + 24 * sc, ccy + 6 * sc); c.fill();
     c.restore();
     // throttle bar
     const tx = lx - bw - 18 * sc, ty = cy - 60 * sc, th = 120 * sc;

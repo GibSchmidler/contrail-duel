@@ -138,9 +138,9 @@ export class AIPilot {
     if (dist < 700 && closing > 110 && offBore > 0.35) {
       _aim.copy(_tp).addScaledVector(_tv, -0.8).sub(P.pos).normalize();
       o.throttle = 0.3; o.airbrake = closing > 160;
-    } else if (speed < 170) {
+    } else if (speed < 140) {
       _aim.y -= 0.35; _aim.normalize(); o.throttle = 1.2; maxPull = Math.min(maxPull, 0.6);
-    } else if (dist > 3000 || speed < 240) {
+    } else if (dist > 3000 || speed < 200) {
       o.throttle = 1.2;
     } else if (dist < 1200 && closing > 60) {
       o.throttle = 0.7;

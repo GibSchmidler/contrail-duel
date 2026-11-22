@@ -10,22 +10,22 @@ export const GRAV = 9.81;
 export const SOUND_SPEED = 340;
 
 export const JET = {
-  mass: 12000,        // kg
-  S: 30,              // wing area m^2
+  mass: 10500,        // kg
+  S: 42,              // effective lifting area m^2 (wings + body lift)
   thrMil: 76000,      // N, military power
   thrAB: 125000,      // N, full afterburner
-  cd0: 0.021,
-  wave: 0.03,         // transonic wave drag rise
-  k: 0.12,            // induced drag factor
-  clA: 4.6,           // lift slope per rad
-  aStall: 0.38,       // rad (~21.8 deg) CL peak
-  aFbw: 0.39,         // FBW AoA limit
-  gMax: 9,
+  cd0: 0.015,
+  wave: 0.022,        // transonic wave drag rise
+  k: 0.13,            // induced drag factor
+  clA: 5.0,           // lift slope per rad
+  aStall: 0.42,       // rad (~24 deg) CL peak
+  aFbw: 0.43,         // FBW AoA limit
+  gMax: 10,
   gMin: -3,
   rollMax: 4.0,       // rad/s (~230 deg/s)
   betaMax: 0.1,       // rad sideslip from full rudder
-  cyb: 1.2,
-  brakeCd: 0.055,
+  cyb: 0.9,
+  brakeCd: 0.04,
   maxThrottle: 1.2,   // >1 = afterburner
 };
 
@@ -166,7 +166,8 @@ export class Aircraft {
     }
 
     // ---- Pilot G tolerance ----
-    if (this.g > 6.5) this.gloc += ((this.g - 6.5) / 2.5) * 0.2 * dt;
+    // ~13 s at 9 G or ~8 s at 10 G before blackout; 7.5 G and below is sustainable
+    if (this.g > 7.5) this.gloc += ((this.g - 7.5) / 2.5) * 0.125 * dt;
     else if (this.g < -2) this.gloc += (-this.g - 2) * 0.3 * dt;
     else this.gloc -= 0.22 * dt;
     this.gloc = clamp(this.gloc, 0, 1.1);

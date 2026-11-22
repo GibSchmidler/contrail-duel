@@ -40,7 +40,7 @@ Then use **Quick match** (pairs the next two people searching), or **Create priv
 
 ## How it works
 
-- **Flight model** (`public/js/flight.js`): a G-command fly-by-wire law with an AoA limiter (9 G / ‑3 G). Lift, induced drag, transonic wave drag, thrust lapse with altitude, and gravity are all physical, so energy management matters. Roll rate falls off at low speed and high AoA. Sustained G fills a pilot G-tolerance meter that leads to blackout.
+- **Flight model** (`public/js/flight.js`): a G-command fly-by-wire law with an AoA limiter (10 G / ‑3 G, corner speed about 320 kts at 3,000 m). Lift, induced drag, transonic wave drag, thrust lapse with altitude, and gravity are all physical, so energy management matters. Roll rate falls off at low speed and high AoA. Sustained G fills a pilot G-tolerance meter that leads to blackout.
 - **Guns:** 20 mm cannon firing 100 rounds/s, 510 rounds per round. The HUD's lead-computing pipper solves the real ballistic intercept, so if you put the gun cross on the pipper, you hit.
 - **Missiles:** 4 IR missiles using proportional navigation, a 3 s motor burn, drag, a G-limit and a seeker gimbal limit. Lock range depends on target aspect and afterburner. Each flare pop gets one chance to seduce the seeker. Beaming, flares, cutting the afterburner, and making the missile bleed energy all defeat it.
 - **Netcode:** each client simulates its own jet and sends its state 30 times a second. The remote jet is extrapolated forward by measured latency, with smooth error correction. Hits are detected by the shooter ("favor the shooter"). The room host is authoritative for score and round flow.
