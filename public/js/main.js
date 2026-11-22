@@ -251,13 +251,21 @@ async function online(action, code) {
   audio.start();
   readMenu();
   setLobby('Connecting…', true);
+  const slow = setTimeout(() => {
+    if ($('lobby').classList.contains('show') && !net.connected) {
+      setLobby('Waking up the server…<br><span class="dim">It sleeps when nobody is playing — this can take up to a minute.</span>', true);
+    }
+  }, 4000);
   try {
     await net.connect(settings.name);
+    clearTimeout(slow);
   } catch (e) {
+    clearTimeout(slow);
     showScreen('menu');
-    toast('Could not reach the game server. Start it with "npm start" and open the page from it (http://localhost:3000).');
+    toast('Could not reach the game server. Check your connection and try again.');
     return;
   }
+  if (!$('lobby').classList.contains('show')) return; // cancelled while connecting
   if (action === 'quick') net.send({ t: 'quick' });
   if (action === 'create') net.send({ t: 'create' });
   if (action === 'join') net.send({ t: 'join', code });

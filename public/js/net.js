@@ -17,7 +17,8 @@ export class Net {
       let ws;
       try { ws = new WebSocket(url); } catch (e) { reject(e); return; }
       this.ws = ws;
-      const timeout = setTimeout(() => { reject(new Error('Connection timed out')); try { ws.close(); } catch {} }, 6000);
+      // Free hosting tiers sleep when idle and can take ~50 s to wake, so be patient.
+      const timeout = setTimeout(() => { reject(new Error('Connection timed out')); try { ws.close(); } catch {} }, 75000);
       ws.onopen = () => {
         clearTimeout(timeout);
         this.connected = true;
