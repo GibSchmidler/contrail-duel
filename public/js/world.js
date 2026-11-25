@@ -259,6 +259,9 @@ function makeWaterNormals() {
 
 // ------------------------------------------------------------------ shaders
 const TERRAIN_FRAG = `
+  // The sea is opaque, so the seabed is never seen. Not drawing it stops it fighting the water
+  // surface for the depth buffer, which flickers badly at long range.
+  if (vWPos.y < -0.3) discard;
   float slope = 1.0 - clamp(normalize(vWNorm).y, 0.0, 1.0);
   float h = vWPos.y;
   vec2 uvA = vWPos.xz / 64.0, uvB = vWPos.xz / 820.0;
@@ -432,7 +435,7 @@ export class World {
       const decl = 'varying vec3 vWPos;\nvarying vec3 vWNorm;\nuniform sampler2D tGrass, tForest, tRock, tSand, tSnow, tMacro;\nuniform vec3 cGrass, cForest, cRock, cSand, cSnow;\nuniform float uSandH, uRockH, uSnowH, uTreeH, uRockSlope, uForest, uDry;\n';
       sh.fragmentShader = decl + sh.fragmentShader.replace('#include <color_fragment>', TERRAIN_FRAG);
     };
-    mat.customProgramCacheKey = () => 'terrain-v2';
+    mat.customProgramCacheKey = () => 'terrain-v3';
     this.terrain = new THREE.Mesh(geo, mat);
     this.terrain.frustumCulled = false;
     this.scene.add(this.terrain);
@@ -454,6 +457,10 @@ export class World {
     this.waterU.tNormal.value = this.waterNormals; this.waterU.tDepth.value = this.depthTex; this.waterU.tMacro.value = this.tex.macro;
     this.waterU.uSunDir.value = SUN_DIR;
     const mat = new THREE.ShaderMaterial({ uniforms: this.waterU, vertexShader: WATER_VERT, fragmentShader: WATER_FRAG, fog: true });
+    // Push the sea back in the depth buffer so low-lying shores always win against it, even far
+    // away where depth precision is coarse. Safe because the seabed isn't drawn: anything behind
+    // the water surface along a view ray is underwater anyway.
+    mat.polygonOffset = true; mat.polygonOffsetFactor = 4; mat.polygonOffsetUnits = 64;
     this.sea = new THREE.Mesh(geo, mat);
     this.scene.add(this.sea);
   }
