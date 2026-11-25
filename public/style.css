@@ -71,3 +71,58 @@ kbd { display: inline-block; min-width: 20px; padding: 1px 5px; border: 1px soli
 .jetinfo .specs { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 7px; }
 .jetinfo .specs i { font-style: normal; background: rgba(255,255,255,0.06); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; color: var(--text); white-space: nowrap; }
 .jetinfo .specs i.no { color: var(--dim); text-decoration: line-through; opacity: 0.7; }
+
+/* ---- mission / room / end ---- */
+.panel.mid { width: min(620px, 100%); }
+.brow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.brow button { width: auto; margin: 0; }
+button.mini { width: auto; margin: 0; padding: 4px 10px; font-size: 12.5px; letter-spacing: 0.03em; }
+button:disabled { opacity: 0.4; cursor: default; }
+button.danger { color: var(--red); border-color: rgba(255,106,90,0.5); }
+.roomhead { display: grid; grid-template-columns: 1fr 1.3fr; gap: 20px; }
+.roomscn select { width: 100%; margin-bottom: 8px; }
+.rsides { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0; }
+.rside h3 { margin-top: 0; }
+.rslot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 13px; }
+#roomHangar { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+#roomHangar summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+#roomHangar #hangar { margin: 10px 0 0; }
+table.stats { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+table.stats th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; }
+table.stats td { padding: 4px 6px; border-top: 1px solid rgba(255,255,255,0.06); }
+
+/* ---- scenario builder ---- */
+#builder { padding: 12px; }
+.bwrap { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; width: min(1280px, 100%); height: calc(100vh - 24px); display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.45); backdrop-filter: blur(6px); overflow: hidden; }
+.bhead { display: flex; align-items: center; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.bhead h2 { margin: 0; white-space: nowrap; }
+.bsum { flex: 1; font-size: 12.5px; color: var(--dim); }
+.bhead button { width: auto; margin: 0; }
+.bbody { flex: 1; display: grid; grid-template-columns: minmax(280px, 520px) 1fr; gap: 18px; padding: 14px 18px; overflow: auto; min-height: 0; }
+.bleft canvas { display: block; border-radius: 8px; border: 1px solid var(--line); touch-action: none; }
+.bshare textarea { width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 12px ui-monospace, monospace; resize: vertical; margin-top: 8px; }
+.bright { overflow: auto; min-height: 0; padding-right: 4px; }
+.bright section { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+.bright .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0 12px; }
+.bright label { margin-bottom: 8px; }
+.bright label.wide input { width: 100%; box-sizing: border-box; }
+.bright input, .bright select { padding: 6px 8px; font-size: 13px; }
+.bside { border-left: 3px solid var(--side) !important; }
+.bside-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bside-head .sname { color: var(--side); font-weight: 700; font-size: 15px; width: 160px; }
+.hdg { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.hdg input[type=number] { width: 70px; margin: 0 !important; }
+label.chk { display: inline-flex; gap: 4px; align-items: center; margin: 0; white-space: nowrap; }
+table.slots { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.slots th { text-align: left; color: var(--dim); font-weight: 500; padding: 2px 4px; }
+table.slots td { padding: 3px 4px; }
+table.slots select { width: 100%; padding: 4px 6px; font-size: 12.5px; }
+table.slots td:first-child { color: var(--dim); width: 18px; }
+.bfoot { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 10px 18px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.bfoot button { width: auto; margin: 0; }
+#bWarn { flex: 1; color: #ffd27a; }
+@media (max-width: 860px) {
+  .bbody, .roomhead, .rsides { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr; }
+}
+table.slots td:nth-child(2) select { min-width: 74px; }

@@ -2,8 +2,8 @@
 // same control inputs a human uses, with skill-dependent reaction time, aim and G use.
 import * as THREE from 'three';
 import { computeLeadDir, airDensity } from './flight.js';
-import { VISUAL_RANGE, WEAPONS, firstOf, countOf, flyout, launchZone } from './arsenal.js';
-import { groundHeight, lineOfSight, ARENA_RADIUS } from './world.js';
+import { WEAPONS, firstOf, countOf, flyout, launchZone } from './arsenal.js';
+import { groundHeight, lineOfSight, ARENA_RADIUS, visRange } from './world.js';
 
 export const SKILLS = {
   drone:  { label: 'Target drone', react: 0.5, maxPull: 0.55, aimTol: 0, gunRange: 0, missiles: false, mslCd: 99, flareP: 0, defend: false, notch: 0 },
@@ -51,7 +51,35 @@ export class AIPilot {
     this.lastKnown = null; this.zoneT = 0; this.zone = null; this.supportT = 0;
   }
 
-  reset() { this.hist.length = 0; this.missileCd = 4 + Math.random() * 4; this.burstT = 0; this.defendingId = null; this.lastKnown = null; this.zone = null; this.supportT = 0; }
+  // Choose whom to fight among the enemies this jet knows about (own sensors + datalink picture).
+  // Sticks with the current target unless another is clearly a better (closer, more in front) choice.
+  pickTarget(enemies, picture) {
+    const P = this.plane;
+    const score = (e) => {
+      const c = picture && picture.get(e);
+      if (!c) return 1e12;
+      const d = c.pos.distanceTo(P.pos);
+      const off = Math.acos(clamp(_d.copy(c.pos).sub(P.pos).normalize().dot(P.fwd), -1, 1));
+      return d * (1 + off * 0.8) * (c.fresh ? 1 : 1.3);
+    };
+    let best = null, bs = 1e12;
+    for (const e of enemies) { if (!e.alive) continue; const sc = score(e); if (sc < bs) { bs = sc; best = e; } }
+    const cur = this.target;
+    if (cur && cur.alive && enemies.includes(cur)) {
+      const cs = score(cur);
+      if (cs < 1e12 && cs < bs * 1.6) return cur;
+      if (!best) return cur;
+    }
+    if (!best) {
+      // nothing known: head for the nearest enemy's area without knowing exactly where it is
+      for (const e of enemies) if (e.alive && (!best || e.pos.distanceToSquared(P.pos) < best.pos.distanceToSquared(P.pos))) best = e;
+    }
+    if (best !== this.target) { this.hist.length = 0; this.lastKnown = null; this.zone = null; }
+    this.target = best;
+    return best;
+  }
+
+  reset() { this.target = null; this.hist.length = 0; this.missileCd = 4 + Math.random() * 4; this.burstT = 0; this.defendingId = null; this.lastKnown = null; this.zone = null; this.supportT = 0; }
 
   // Target state the AI "perceives": delayed by reaction time, then extrapolated.
   perceive(pos, vel) {
@@ -63,7 +91,8 @@ export class AIPilot {
     _tv.copy(h.v);
   }
 
-  update(dt, target, combat, threat) {
+  // ctx: { friends: [aircraft], home: Vector3 (where to search when nothing is known), picture }
+  update(dt, target, combat, threat, ctx = {}) {
     const P = this.plane, S = this.skill, o = this.out;
     this.time += dt;
     this.missileCd -= dt; this.flareCd -= dt; this.burstT -= dt; this.supportT -= dt;
@@ -75,11 +104,12 @@ export class AIPilot {
     }
     // ---------- what the AI knows: its radar track or its eyes, like a human ----------
     const trueDist = target.pos.distanceTo(P.pos);
-    const eyes = trueDist < VISUAL_RANGE && lineOfSight(P.pos, target.pos);
+    const eyes = trueDist < visRange() && lineOfSight(P.pos, target.pos);
     const irst = P.irst && P.irst.contact;
-    const known = P.radar.contact || eyes || irst;
+    const pc = ctx.picture && ctx.picture.get(target);
+    const known = P.radar.contact || eyes || irst || (pc && pc.mem > 0);
     if (known) {
-      const src = eyes || (!P.radar.contact && !irst) ? target : P.radar.contact ? P.radar : P.irst;
+      const src = eyes ? target : P.radar.contact ? P.radar : irst ? P.irst : pc || target;
       this.perceive(src.pos, src.vel);
       this.lastKnown = (this.lastKnown || new THREE.Vector3()).copy(src.pos);
     }
@@ -144,7 +174,7 @@ export class AIPilot {
 
     // ---------- no contact: search toward where the bandit was last seen ----------
     if (!known || !this.hist.length) {
-      const goal = this.lastKnown || _t.set(0, 3000, 0);
+      const goal = this.lastKnown || ctx.home || _t.set(0, 3000, 0);
       _d.copy(goal).sub(P.pos); _d.y = (3500 - P.pos.y) * 0.5; _d.normalize();
       // gentle weave sweeps the radar across more sky
       _d.addScaledVector(P.right, Math.sin(this.time * 0.4) * 0.25).normalize();
@@ -188,6 +218,13 @@ export class AIPilot {
       o.throttle = 0.7;
     }
 
+    // don't fly into a wingman
+    if (ctx.friends) for (const f of ctx.friends) {
+      if (f === P || !f.alive) continue;
+      _t.copy(f.pos).sub(P.pos);
+      const fd = _t.length();
+      if (fd < 320 && _t.dot(P.vel) > 0) { _aim.addScaledVector(_t.divideScalar(fd), -0.8).normalize(); break; }
+    }
     steer(P, _aim, maxPull, o);
 
     // ---------- weapons ----------
@@ -196,6 +233,13 @@ export class AIPilot {
     const shotOk = !headOn || S.label === 'Ace';
     if (shotOk && dist < S.gunRange && aimErr < S.aimTol + 2.2 / Math.max(dist, 50) && P.gunAmmo > 0) this.burstT = 0.25 + Math.random() * 0.35;
     if (this.burstT > 0 && dist < S.gunRange * 1.15) o.gun = true;
+    // never shoot through a friendly
+    if (o.gun && ctx.friends) for (const f of ctx.friends) {
+      if (f === P || !f.alive) continue;
+      _t.copy(f.pos).sub(P.pos);
+      const fd = _t.length();
+      if (fd < dist + 200 && _t.dot(P.fwd) / Math.max(fd, 1) > Math.cos(0.12)) { o.gun = false; this.burstT = 0; break; }
+    }
     if (S.missiles && this.missileCd <= 0 && P.weapon === o.weapon) {
       const sKey = firstOf(P.stores, 'srm'), mKey = firstOf(P.stores, 'mrm');
       if (o.weapon === 'srm' && P.locked && nS > 0 && dist > 500 && dist < WEAPONS[sKey].seeker * 0.5) {

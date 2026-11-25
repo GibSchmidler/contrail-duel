@@ -15,8 +15,9 @@
   <div id="menu" class="screen">
     <div class="panel wide">
       <h1>CONTRAIL <span>DUEL</span></h1>
-      <p class="tag">1v1 modern air combat · 4 nations · 13 fighters · keyboard only</p>
+      <p class="tag">Modern air combat · 4 nations · 13 fighters · up to 8 pilots and 16 jets · keyboard only</p>
 
+      <div id="hangarHome">
       <section id="hangar">
         <h2>Aircraft</h2>
         <div id="countryTabs" class="tabs"></div>
@@ -25,51 +26,37 @@
         <div id="jetInfo" class="jetinfo"></div>
         <label>Loadout <select id="loadout"></select></label>
       </section>
+      </div>
 
       <div class="grid">
         <section>
           <h2>Pilot</h2>
           <label>Callsign <input id="callsign" maxlength="16" autocomplete="off"></label>
-          <label>First to
-            <select id="rounds"><option value="1">1 kill</option><option value="3">3 kills</option><option value="5">5 kills</option><option value="7">7 kills</option></select>
-          </label>
-          <label>Start
-            <select id="engage">
-              <option value="bvr">Beyond visual range — 36 km apart</option>
-              <option value="merge">Merge — 7 km apart, straight to the dogfight</option>
-            </select>
-          </label>
           <label class="check"><input type="checkbox" id="invert"> W pulls the nose up (unchecked = flight-stick style, S pulls up)</label>
           <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
           <button id="btnMenuHelp" class="ghost">Controls &amp; tips</button>
-        </section>
 
-        <section>
-          <h2>Practice</h2>
-          <label>Opponent
-            <select id="difficulty">
-              <option value="drone">Target drone (doesn't shoot)</option>
-              <option value="rookie">Rookie</option>
-              <option value="pilot">Veteran</option>
-              <option value="ace">Ace</option>
-            </select>
-          </label>
-          <label>Enemy aircraft <select id="aiJet"></select></label>
-          <button id="btnPractice" class="primary">Fly vs AI</button>
-
-          <h2 class="mt">Online 1v1</h2>
-          <button id="btnQuick" class="primary">Quick match</button>
-          <button id="btnCreate">Create private room</button>
+          <h2 class="mt">Online</h2>
+          <button id="btnQuick">Quick 1v1 match</button>
+          <button id="btnCreate">Host a room (uses the mission on the right)</button>
           <div class="row">
             <input id="joinCode" placeholder="CODE" maxlength="4" autocomplete="off">
             <button id="btnJoin">Join room</button>
           </div>
         </section>
+
+        <section>
+          <h2>Mission</h2>
+          <label>Scenario <select id="scenarioSel"></select></label>
+          <p id="scenarioInfo" class="dim small"></p>
+          <button id="btnPractice" class="primary">Fly vs AI</button>
+          <button id="btnBuilder">Scenario builder: edit, create, share</button>
+        </section>
       </div>
     </div>
   </div>
 
-  <!-- Lobby -->
+  <!-- Connecting / searching -->
   <div id="lobby" class="screen">
     <div class="panel">
       <h2>Online</h2>
@@ -77,6 +64,36 @@
       <button id="lobbyCancel">Cancel</button>
     </div>
   </div>
+
+  <!-- Online room -->
+  <div id="room" class="screen">
+    <div class="panel wide">
+      <div class="roomhead">
+        <div>
+          <h2>Room</h2>
+          <b class="code" id="roomCode">----</b> <span id="roomQuick" class="dim">quick match</span>
+          <p class="dim small">Share this code with up to 7 friends. Empty seats are flown by the AI.</p>
+        </div>
+        <div class="roomscn">
+          <select id="roomScenarioSel"></select>
+          <div id="roomScenario"></div>
+        </div>
+      </div>
+      <p id="roomMembers" class="dim small"></p>
+      <div id="roomSides" class="rsides"></div>
+      <p id="roomYou" class="small"></p>
+      <details id="roomHangar"><summary>Change your aircraft</summary></details>
+      <div class="brow">
+        <button id="btnRoomEdit">Edit scenario</button>
+        <button id="btnRoomStart" class="primary">Start match</button>
+        <span id="roomWait" class="dim">Waiting for the host to start…</span>
+        <button id="btnRoomLeave" class="ghost">Leave room</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scenario builder -->
+  <div id="builder" class="screen"></div>
 
   <!-- Pause -->
   <div id="pause" class="screen">
@@ -91,9 +108,10 @@
 
   <!-- Match end -->
   <div id="end" class="screen">
-    <div class="panel">
+    <div class="panel mid">
       <h1 id="endTitle">VICTORY</h1>
       <p id="endScore" class="big"></p>
+      <div id="endStats"></div>
       <p id="endStatus" class="dim"></p>
       <button id="btnRematch" class="primary">Rematch</button>
       <button id="btnEndMenu">Main menu</button>
@@ -114,7 +132,8 @@
           <tr><td><kbd>B</kbd> (hold)</td><td>Airbrake</td></tr>
           <tr><td><kbd>Space</kbd></td><td>Cannon</td></tr>
           <tr><td><kbd>1</kbd> · <kbd>2</kbd></td><td>Select IR missile · radar missile</td></tr>
-          <tr><td><kbd>Tab</kbd> or <kbd>L</kbd></td><td>Radar lock on / off (single-target track)</td></tr>
+          <tr><td><kbd>N</kbd></td><td>Next target (or next jet when spectating)</td></tr>
+          <tr><td><kbd>Tab</kbd> or <kbd>L</kbd></td><td>Radar lock on / off the target (single-target track)</td></tr>
           <tr><td><kbd>X</kbd></td><td>Fire selected missile</td></tr>
           <tr><td><kbd>C</kbd> · <kbd>Z</kbd></td><td>Flares (vs IR) · Chaff (vs radar)</td></tr>
           <tr><td><kbd>T</kbd></td><td>Padlock view (with a helmet sight, cues the IR seeker)</td></tr>
@@ -123,6 +142,9 @@
           <tr><td><kbd>Esc</kbd> · <kbd>H</kbd></td><td>Pause · this help</td></tr>
         </table>
         <div class="tips">
+          <h3>Scenarios</h3>
+          <p>Pick a mission on the main menu or build your own: up to <b>8 jets a side</b> on four maps (Islands, Alpine, Desert Canyons, Arctic Fjords) at dawn, day, dusk or night, in clear skies to full overcast. Any seat can be a <b>human seat</b> or <b>AI</b>, so you can fly co-op against AI, team vs team online, or mix the two. Share a scenario with <b>Copy link</b>; online, the host's scenario is sent to everyone in the room.</p>
+          <p>Your HUD shows every contact you know about: boxes are your own radar tracks, triangles are <b>datalink</b> tracks shared by your wingmen, and blue marks are friendlies. The game picks the target closest to your nose; press <kbd>N</kbd> to cycle. Night and haze shrink how far you can see.</p>
           <h3>Nations and jets</h3>
           <p>Each jet uses its real thrust, weight, wing, radar, sensors, gun and missiles. Nothing is balanced, so some jets are simply better. <b>USA</b> has the best radars and missiles, plus the F-22. <b>Russia</b> has big thrust-vectoring Flankers with IRST. <b>China</b> has AESA radars, the long-range PL-15 and the gunless J-20. <b>Europe</b> has agile deltas with the best jamming, missile warning and the ramjet Meteor.</p>
           <h3>Flying</h3>

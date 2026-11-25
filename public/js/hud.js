@@ -255,67 +255,90 @@ export class Hud {
     }
   }
 
-  // Target designation: a full box only for a radar track; eyeball brackets inside visual range.
+  // Everything the pilot knows about, drawn where it is: the designated target gets the full
+  // treatment (box / range / closure / lock diamond); other contacts get small symbols by source.
   target(S, sc) {
     const c = this.ctx, w = this.w, h = this.h;
-    if (!S.opp || !S.opp.alive || !S.plane.alive) return;
-    const R = S.radar;
-    const tracked = S.tracked, visual = S.visual;
-    const irst = !tracked && !visual && S.irst && S.irst.contact; // passive: bearing only, no range
-    if (!tracked && !visual && !irst) return;
-    const pos = tracked && !visual ? R.pos : irst ? S.irst.pos : S.opp.pos;
-    const pt = S.project(pos);
+    if (!S.plane.alive) return;
     const margin = 40 * sc;
-    const on = !pt.behind && pt.x > margin && pt.x < w - margin && pt.y > margin && pt.y < h - margin;
-    const dist = tracked && !visual ? R.pos.distanceTo(S.plane.pos) : S.oppDist;
-    const distTxt = irst ? 'IRST' : dist > 2000 ? (dist / 1000).toFixed(1) + ' km' : Math.round(dist) + ' m';
-    const memory = tracked && R.mem < RADAR.memory - 0.05; // coasting on a lost track
-    c.strokeStyle = RED; c.fillStyle = RED;
     c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+    for (const k of S.contacts || []) {
+      if (k.tgt) continue;
+      const pt = S.project(k.pos);
+      const on = !pt.behind && pt.x > margin && pt.x < w - margin && pt.y > margin && pt.y < h - margin;
+      if (!on) continue;
+      const s = Math.max(7 * sc, Math.min(30, 1400 / Math.max(k.dist, 1)));
+      c.lineWidth = 1.4 * sc;
+      if (k.kind === 'friend') {
+        c.strokeStyle = CYAN; c.fillStyle = CYAN;
+        c.beginPath(); c.arc(pt.x, pt.y, s * 0.8, Math.PI, 0); c.stroke();
+        if (k.dist < 6000) { c.textAlign = 'center'; c.fillText(k.name, pt.x, pt.y - s - 8 * sc); }
+        continue;
+      }
+      c.strokeStyle = k.kind === 'irst' ? AMBER : k.kind === 'dl' || k.kind === 'mem' ? 'rgba(255,90,74,0.55)' : RED;
+      c.fillStyle = c.strokeStyle;
+      if (k.kind === 'irst') { c.setLineDash([3 * sc, 3 * sc]); c.beginPath(); c.arc(pt.x, pt.y, s, 0, Math.PI * 2); c.stroke(); c.setLineDash([]); }
+      else if (k.kind === 'eyes') {
+        const q = s * 0.45; c.beginPath();
+        for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { c.moveTo(pt.x + sx * s, pt.y + sy * (s - q)); c.lineTo(pt.x + sx * s, pt.y + sy * s); c.lineTo(pt.x + sx * (s - q), pt.y + sy * s); }
+        c.stroke();
+      } else if (k.kind === 'dl') { c.beginPath(); c.moveTo(pt.x, pt.y - s); c.lineTo(pt.x + s, pt.y + s * 0.7); c.lineTo(pt.x - s, pt.y + s * 0.7); c.closePath(); c.stroke(); }
+      else { if (k.kind === 'mem') c.setLineDash([3 * sc, 3 * sc]); c.strokeRect(pt.x - s * 0.7, pt.y - s * 0.7, s * 1.4, s * 1.4); c.setLineDash([]); }
+      c.textAlign = 'center';
+      if (k.kind !== 'irst') c.fillText(k.dist > 2000 ? (k.dist / 1000).toFixed(0) : Math.round(k.dist / 100) / 10 + '', pt.x, pt.y + s + 11 * sc);
+    }
+    const T = S.tgt;
+    if (!T) return;
+    const R = S.radar;
+    const pos = T.pos;
+    const pt = S.project(pos);
+    const on = !pt.behind && pt.x > margin && pt.x < w - margin && pt.y > margin && pt.y < h - margin;
+    const dist = T.dist;
+    const irst = T.kind === 'irst';
+    const tracked = T.kind === 'stt' || T.kind === 'trk' || T.kind === 'mem';
+    const visual = T.kind === 'eyes' || T.visual;
+    const distTxt = irst ? 'IRST' : dist > 2000 ? (dist / 1000).toFixed(1) + ' km' : Math.round(dist) + ' m';
+    const memory = T.kind === 'mem' || T.kind === 'dl';
+    c.strokeStyle = RED; c.fillStyle = RED; c.lineWidth = 1.6 * sc;
     if (on) {
       const s = Math.max(12 * sc, Math.min(60, 2400 / Math.max(dist, 1)));
       if (irst) {
         c.strokeStyle = AMBER; c.fillStyle = AMBER;
-        c.setLineDash([3 * sc, 3 * sc]);
-        c.beginPath(); c.arc(pt.x, pt.y, s, 0, Math.PI * 2); c.stroke();
-        c.setLineDash([]);
+        c.setLineDash([3 * sc, 3 * sc]); c.beginPath(); c.arc(pt.x, pt.y, s, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
         c.textAlign = 'center'; c.fillText('IRST', pt.x, pt.y + s + 12 * sc);
-      } else if (tracked) {
+      } else if (tracked || T.kind === 'dl') {
         c.setLineDash(memory ? [4 * sc, 4 * sc] : []);
-        c.lineWidth = (R.stt ? 2.4 : 1.6) * sc;
+        c.lineWidth = (R.stt ? 2.4 : 1.8) * sc;
         c.strokeRect(pt.x - s, pt.y - s, s * 2, s * 2);
         c.setLineDash([]); c.lineWidth = 1.6 * sc;
         c.textAlign = 'center';
         c.fillText(distTxt, pt.x, pt.y + s + 12 * sc);
         if (S.closure != null && !memory) c.fillText(`${S.closure > 0 ? '+' : ''}${Math.round(S.closure * 1.944)} kt`, pt.x, pt.y + s + 27 * sc);
-        c.fillText(R.stt ? 'STT' : memory ? 'MEM' : 'TRK', pt.x, pt.y - s - 10 * sc);
+        c.fillText(R.stt ? 'STT' : T.kind === 'dl' ? 'LINK' : memory ? 'MEM' : 'TGT', pt.x, pt.y - s - 10 * sc);
       } else {
-        // visual only: corner brackets, no data
         const k = s * 0.45;
+        c.lineWidth = 2 * sc;
         c.beginPath();
-        for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-          c.moveTo(pt.x + sx * s, pt.y + sy * (s - k)); c.lineTo(pt.x + sx * s, pt.y + sy * s); c.lineTo(pt.x + sx * (s - k), pt.y + sy * s);
-        }
-        c.stroke();
+        for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { c.moveTo(pt.x + sx * s, pt.y + sy * (s - k)); c.lineTo(pt.x + sx * s, pt.y + sy * s); c.lineTo(pt.x + sx * (s - k), pt.y + sy * s); }
+        c.stroke(); c.lineWidth = 1.6 * sc;
         c.textAlign = 'center'; c.fillText(distTxt, pt.x, pt.y + s + 12 * sc);
       }
-      if (visual && S.oppDist < 2500) {
-        c.fillText(S.oppName || 'BANDIT', pt.x, pt.y - s - (tracked ? 24 : 10) * sc);
+      if (visual && dist < 2500) {
+        c.textAlign = 'center';
+        c.fillText(T.name || 'BANDIT', pt.x, pt.y - s - (tracked ? 24 : 10) * sc);
         const bw = 44 * sc;
         c.strokeRect(pt.x - bw / 2, pt.y - s - (tracked ? 40 : 26) * sc, bw, 5 * sc);
-        c.fillRect(pt.x - bw / 2, pt.y - s - (tracked ? 40 : 26) * sc, (bw * Math.max(0, S.opp.hp)) / 100, 5 * sc);
+        c.fillRect(pt.x - bw / 2, pt.y - s - (tracked ? 40 : 26) * sc, (bw * Math.max(0, T.hp)) / 100, 5 * sc);
       }
-      // IR lock diamond
       if (S.lock.inCone || S.lock.locked) {
         const d = (S.lock.locked ? s + 8 * sc : s + 30 * sc * (1 - S.lock.progress));
         c.strokeStyle = S.lock.locked ? RED : AMBER;
         c.lineWidth = 2 * sc;
         c.beginPath(); c.moveTo(pt.x, pt.y - d); c.lineTo(pt.x + d, pt.y); c.lineTo(pt.x, pt.y + d); c.lineTo(pt.x - d, pt.y); c.closePath(); c.stroke();
         c.lineWidth = 1.6 * sc;
-        if (S.lock.locked && Math.floor(this.flashT * 4) % 2 === 0) { c.fillStyle = RED; c.fillText('LOCK', pt.x, pt.y + d + 42 * sc); }
+        if (S.lock.locked && Math.floor(this.flashT * 4) % 2 === 0) { c.fillStyle = RED; c.textAlign = 'center'; c.fillText('LOCK', pt.x, pt.y + d + 42 * sc); }
       }
     } else {
-      // off-screen arrow around the center
       const cs = S.camSpace(pos);
       let dx = cs.x, dy = -cs.y;
       if (Math.hypot(dx, dy) < 1e-3) dy = 1;
@@ -374,37 +397,42 @@ export class Hud {
     }
   }
 
-  // Fire-control radar: a ±60° sector, auto-scaled, showing only what the radar sees.
+  // Fire-control radar: a sector scope, auto-scaled, showing own-radar tracks and datalink tracks.
   radar(S, sc) {
     const c = this.ctx, P = S.plane, w = this.w, h = this.h, Rd = S.radar;
     const Rp = 78 * sc, cx = w / 2, cy = h - 18 * sc;
-    const contactDist = Rd.contact ? Rd.pos.distanceTo(P.pos) : 0;
-    const range = contactDist > 18000 || !Rd.contact ? 40000 : contactDist > 8000 ? 20000 : 10000;
+    const blips = S.blips || [];
+    const tgtB = blips.find((b) => b.tgt);
+    const ref = tgtB ? tgtB.pos.distanceTo(P.pos) : 0;
+    const range = !tgtB || ref > 18000 ? 40000 : ref > 8000 ? 20000 : 10000;
     const g = Math.min(1.4, (P.radarT || RADAR).gimbal);
     c.fillStyle = 'rgba(0,20,8,0.3)'; c.strokeStyle = 'rgba(157,255,184,0.45)';
     c.beginPath(); c.moveTo(cx, cy); c.arc(cx, cy, Rp, -Math.PI / 2 - g, -Math.PI / 2 + g); c.closePath(); c.fill(); c.stroke();
     c.beginPath(); c.arc(cx, cy, Rp / 2, -Math.PI / 2 - g, -Math.PI / 2 + g); c.stroke();
     c.font = `${Math.round(10 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'left'; c.fillStyle = 'rgba(157,255,184,0.7)';
     c.fillText(`${range / 1000}`, cx + Math.sin(g) * Rp + 4 * sc, cy - Math.cos(g) * Rp);
-    // sweep line
     const sweep = Math.sin(this.flashT * 1.6) * g;
     if (!Rd.stt) { c.strokeStyle = 'rgba(157,255,184,0.25)'; c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.sin(sweep) * Rp, cy - Math.cos(sweep) * Rp); c.stroke(); }
-    if (Rd.contact) {
-      // bearing relative to the nose (azimuth in the horizontal plane of the jet)
-      _v.copy(Rd.pos).sub(P.pos);
+    for (const b of blips) {
+      _v.copy(b.pos).sub(P.pos);
+      const d = _v.length();
       const az = Math.atan2(_v.dot(P.right), _v.dot(P.fwd));
-      const rr = Math.min(1, contactDist / range) * Rp;
-      const px = cx + Math.sin(az) * rr, py = cy - Math.cos(az) * rr;
-      const fresh = Rd.mem > RADAR.memory - 0.05;
-      c.globalAlpha = fresh ? 1 : 0.45;
-      c.fillStyle = Rd.stt ? RED : GREEN; c.strokeStyle = c.fillStyle;
-      const s = 4 * sc;
-      if (Rd.stt) c.fillRect(px - s, py - s, 2 * s, 2 * s); else c.strokeRect(px - s, py - s, 2 * s, 2 * s);
-      // target heading stick
-      const hv = _w.copy(Rd.vel); const ha = Math.atan2(hv.dot(P.right), hv.dot(P.fwd));
-      c.beginPath(); c.moveTo(px, py); c.lineTo(px + Math.sin(ha) * 9 * sc, py - Math.cos(ha) * 9 * sc); c.stroke();
-      const dy = Rd.pos.y - P.pos.y;
-      c.fillText(`${Math.round(Rd.pos.y * 3.281 / 1000)}`, px + 6 * sc, py - 4 * sc);
+      if (Math.abs(az) > g + 0.05 && !b.dl) continue;
+      const rr = Math.min(1, d / range) * Rp;
+      const aa = Math.max(-g, Math.min(g, az));
+      const px = cx + Math.sin(aa) * rr, py = cy - Math.cos(aa) * rr;
+      c.globalAlpha = b.fresh ? 1 : 0.5;
+      c.fillStyle = b.stt ? RED : b.friend ? CYAN : b.dl ? AMBER : GREEN; c.strokeStyle = c.fillStyle;
+      const s = (b.tgt ? 4.5 : 3.2) * sc;
+      if (b.friend) { c.beginPath(); c.arc(px, py, s, Math.PI, 0); c.stroke(); }
+      else if (b.dl) { c.beginPath(); c.moveTo(px, py - s); c.lineTo(px + s, py + s); c.lineTo(px - s, py + s); c.closePath(); c.stroke(); }
+      else if (b.stt) c.fillRect(px - s, py - s, 2 * s, 2 * s); else c.strokeRect(px - s, py - s, 2 * s, 2 * s);
+      if (b.tgt && !b.stt) { c.beginPath(); c.arc(px, py, s + 4 * sc, 0, Math.PI * 2); c.stroke(); }
+      if (b.vel && !b.friend) {
+        const ha = Math.atan2(b.vel.dot(P.right), b.vel.dot(P.fwd));
+        c.beginPath(); c.moveTo(px, py); c.lineTo(px + Math.sin(ha) * 9 * sc, py - Math.cos(ha) * 9 * sc); c.stroke();
+      }
+      if (b.tgt) c.fillText(`${Math.round(b.pos.y * 3.281 / 1000)}`, px + 6 * sc, py - 4 * sc);
       c.globalAlpha = 1;
     }
     c.fillStyle = GREEN; c.beginPath(); c.moveTo(cx, cy - 6 * sc); c.lineTo(cx - 4 * sc, cy + 2 * sc); c.lineTo(cx + 4 * sc, cy + 2 * sc); c.closePath(); c.fill();
@@ -426,9 +454,9 @@ export class Hud {
       const rr = (inner ? 0.45 : 0.8) * Rr;
       c.fillStyle = color; c.fillText(txt, cx + Math.sin(az) * rr, cy - Math.cos(az) * rr);
     };
-    if (T && T.emitter && T.search && S.opp) {
-      const color = T.launch ? (blink ? RED : AMBER) : T.lock ? AMBER : GREEN;
-      sym(T.emitter, (T.launch ? '◆' : '') + (T.code || 'F'), color, T.lock);
+    if (T && T.emitters) for (const e of T.emitters) {
+      const color = e.launch ? (blink ? RED : AMBER) : e.lock ? AMBER : GREEN;
+      sym(e.pos, (e.launch ? '◆' : '') + (e.code || 'F'), color, e.lock);
     }
     if (T) for (const t of T.list) if (t.kind === 'active') sym(t.pos, 'M', blink ? RED : '#ffffff', true);
   }
@@ -436,8 +464,8 @@ export class Hud {
   // Dynamic launch zone for the selected missile (right of the altitude tape).
   dlz(S, sc) {
     const D = S.dlz, c = this.ctx, P = S.plane;
-    if (!D || !S.opp || (!S.tracked && !S.visual)) return;
-    const range = S.tracked && !S.visual ? S.radar.pos.distanceTo(P.pos) : S.oppDist;
+    if (!D || !S.tgt || S.tgt.kind === 'irst') return;
+    const range = S.tgt.dist;
     const x = this.w / 2 + 300 * sc + 110 * sc, top = this.h / 2 - 110 * sc, H = 220 * sc;
     const full = Math.max(D.rMax * 1.25, Math.min(range * 1.1, D.rMax * 2.5));
     const yOf = (r) => top + H * (1 - Math.min(1, r / full));
@@ -488,16 +516,42 @@ export class Hud {
 
   scoreboard(S, sc) {
     const c = this.ctx, w = this.w;
-    c.textAlign = 'center';
-    c.font = `bold ${Math.round(16 * sc)}px "Consolas","Menlo",monospace`;
     const y = 18 * sc;
-    c.fillStyle = '#9fd0ff'; c.textAlign = 'right'; c.fillText(`${S.myName}  ${S.scores.me}`, w / 2 - 16 * sc, y);
-    c.fillStyle = '#cccccc'; c.textAlign = 'center'; c.fillText('–', w / 2, y);
-    c.fillStyle = '#ff9c8f'; c.textAlign = 'left'; c.fillText(`${S.scores.opp}  ${S.oppName}`, w / 2 + 16 * sc, y);
-    c.fillStyle = 'rgba(255,255,255,0.6)'; c.textAlign = 'center';
-    c.font = `${Math.round(11 * sc)}px "Consolas","Menlo",monospace`;
-    c.fillText(`FIRST TO ${S.roundsToWin}`, w / 2, y + 16 * sc);
+    const teams = S.teams || [];
+    if (teams.length === 2) {
+      c.font = `bold ${Math.round(16 * sc)}px "Consolas","Menlo",monospace`;
+      const [a, b] = teams;
+      c.fillStyle = a.color; c.textAlign = 'right'; c.fillText(`${a.name}  ${a.won}`, w / 2 - 16 * sc, y);
+      c.fillStyle = '#cccccc'; c.textAlign = 'center'; c.fillText('–', w / 2, y);
+      c.fillStyle = b.color; c.textAlign = 'left'; c.fillText(`${b.won}  ${b.name}`, w / 2 + 16 * sc, y);
+      // aircraft still in the fight on each side
+      const pip = (x0, dir, t) => {
+        for (let i = 0; i < t.total; i++) {
+          const x = x0 + dir * i * 11 * sc;
+          c.fillStyle = i < t.alive ? t.color : 'rgba(255,255,255,0.18)';
+          c.beginPath(); c.moveTo(x, y + 12 * sc); c.lineTo(x + 4 * sc, y + 21 * sc); c.lineTo(x - 4 * sc, y + 21 * sc); c.closePath(); c.fill();
+        }
+      };
+      pip(w / 2 - 22 * sc, -1, a); pip(w / 2 + 22 * sc, 1, b);
+      c.fillStyle = 'rgba(255,255,255,0.6)'; c.textAlign = 'center';
+      c.font = `${Math.round(11 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillText(`FIRST TO ${S.roundsToWin}${S.timeLeft != null ? '  ·  ' + Math.floor(S.timeLeft / 60) + ':' + String(Math.floor(S.timeLeft % 60)).padStart(2, '0') : ''}`, w / 2, y + 34 * sc);
+    }
+    // kill feed
+    c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'right';
+    let fy = 22 * sc;
+    for (const f of S.feed || []) {
+      c.globalAlpha = Math.min(1, f.t);
+      c.fillStyle = f.color || '#ffffff';
+      c.fillText(f.text, w - 18 * sc, fy); fy += 18 * sc;
+    }
+    c.globalAlpha = 1;
+    if (S.spectate) {
+      c.textAlign = 'center'; c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillStyle = '#ffffff'; c.fillText(S.spectate, w / 2, this.h - 40 * sc);
+    }
     if (S.countdown > 0) {
+      c.textAlign = 'center';
       c.font = `bold ${Math.round(64 * sc)}px "Consolas","Menlo",monospace`;
       c.fillStyle = GREEN;
       c.fillText(String(Math.ceil(S.countdown)), w / 2, this.h * 0.32);

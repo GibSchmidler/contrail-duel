@@ -3,7 +3,7 @@
 // Every jet has its own radar; targets differ in radar cross-section, IR signature and jamming.
 import * as THREE from 'three';
 import { RADAR, RADARS, RWR, MAWS, WEAPONS, rcsFactor } from './arsenal.js';
-import { lineOfSight } from './world.js';
+import { lineOfSight, visRange } from './world.js';
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const _rel = new THREE.Vector3(), _u = new THREE.Vector3();
@@ -172,5 +172,96 @@ export function assessThreats(me, opp, missiles) {
     if (maws && m.burning && closing && d < MAWS.range && lineOfSight(m.pos, me.pos)) { out.maws = true; kind = kind || 'maws'; }
     if (kind) { out.list.push({ pos: m.pos, kind, dist: d }); out.nearest = Math.min(out.nearest, d); }
   }
+  return out;
+}
+
+// ------------------------------------------------------------------
+// Many-aircraft awareness. Each jet keeps a picture of every enemy it knows about:
+// its own radar (track-while-scan), IRST, the pilot's eyes, and tracks shared over the
+// datalink by friendly jets. Refreshed a few times a second.
+export function scanContacts(plane, enemies, dt) {
+  const C = plane.contacts || (plane.contacts = new Map());
+  plane.scanT = (plane.scanT || 0) - dt;
+  const due = plane.scanT <= 0;
+  if (due) plane.scanT = 0.25;
+  for (const [e, c] of C) {
+    if (!e.alive || !enemies.includes(e)) { C.delete(e); continue; }
+    if (!due) { c.pos.addScaledVector(c.vel, dt); }
+  }
+  if (!due) return C;
+  const vis = visRange();
+  for (const e of enemies) {
+    if (!e.alive || !plane.alive) continue;
+    const d = e.pos.distanceTo(plane.pos);
+    const radar = radarSees(plane, e);
+    let irst = false;
+    if (plane.T && plane.T.irst && d < irstRange(plane, e)) {
+      _rel.copy(e.pos).sub(plane.pos).divideScalar(d || 1);
+      irst = _rel.dot(plane.fwd) > Math.cos(1.05) && lineOfSight(plane.pos, e.pos);
+    }
+    const eyes = d < vis && (radar || irst || lineOfSight(plane.pos, e.pos));
+    let c = C.get(e);
+    if (radar || irst || eyes) {
+      if (!c) { c = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), mem: 0 }; C.set(e, c); }
+      c.pos.copy(e.pos); c.vel.copy(e.vel); c.mem = 4; c.radar = radar; c.irst = irst; c.eyes = eyes; c.fresh = true; c.dl = false;
+    } else if (c) {
+      c.mem -= 0.25; c.radar = c.irst = c.eyes = c.fresh = false;
+      c.pos.addScaledVector(c.vel, 0.25);
+      if (c.mem <= 0) C.delete(e);
+    }
+  }
+  return C;
+}
+// Merge friendly datalink tracks into a picture (does not overwrite the jet's own fresher data).
+export function datalinkPicture(plane, friends) {
+  const out = new Map();
+  for (const [e, c] of plane.contacts || []) out.set(e, c);
+  for (const f of friends) {
+    if (f === plane || !f.alive || !f.contacts) continue;
+    for (const [e, c] of f.contacts) {
+      if (!c.radar && !c.irst) continue;           // eyeball sightings aren't on the link
+      if (out.has(e) && (out.get(e).fresh || !out.get(e).dl)) continue;
+      out.set(e, { pos: c.pos, vel: c.vel, mem: c.mem, radar: false, irst: false, eyes: false, fresh: false, dl: true });
+    }
+  }
+  return out;
+}
+
+// RWR + MAWS against every enemy at once. missiles: enemy missiles with { pos, vel, guidance,
+// burning, phase, target }. emitters: who is painting me, and whether they hold a lock on me.
+export function assessThreatsMulti(me, enemies, missiles) {
+  const out = { search: false, lock: false, launch: false, active: false, maws: false, list: [], nearest: 1e9, emitter: null, emitters: [], code: null };
+  if (!me.alive) return out;
+  for (const opp of enemies) {
+    if (!opp.alive || opp.radarMode === 0) continue;
+    const RT = opp.radarT || RADARS.apg68;
+    _rel.copy(me.pos).sub(opp.pos);
+    const d = _rel.length();
+    const locking = opp.radarMode === 2 && opp.lockTgt === me;
+    const range = RWR.range * RT.lpi * (locking ? 1.25 : 1);
+    if (d < range && _rel.divideScalar(d).dot(opp.fwd) > Math.cos(RT.gimbal) && lineOfSight(opp.pos, me.pos)) {
+      const em = { pos: opp.pos, code: opp.T ? opp.T.rwr : 'F', lock: locking, launch: false, plane: opp, dist: d };
+      out.emitters.push(em);
+      out.search = true;
+      if (locking) out.lock = true;
+      if (!out.emitter || (locking && !out.emitter.lock) || (locking === out.emitter.lock && d < out.emitter.dist)) { out.emitter = em; out.code = em.code; }
+    }
+  }
+  const maws = !me.T || me.T.maws;
+  for (const m of missiles) {
+    const d = m.pos.distanceTo(me.pos);
+    _rel.copy(me.pos).sub(m.pos);
+    const closing = m.vel.dot(_rel) > 0;
+    const mine = m.target === me;
+    let kind = null;
+    if (mine && m.guidance === 'radar' && m.phase === 'active' && d < 14000 && lineOfSight(m.pos, me.pos)) { out.active = true; kind = 'active'; }
+    else if (mine && (m.guidance === 'radar' || m.guidance === 'sarh') && (m.phase === 'dl' || m.phase === 'sarh')) {
+      const em = out.emitters.find((e) => e.plane === m.owner && e.lock);
+      if (em) { out.launch = true; em.launch = true; }
+    }
+    if (maws && m.burning && closing && d < MAWS.range && lineOfSight(m.pos, me.pos)) { out.maws = true; kind = kind || 'maws'; }
+    if (kind) { out.list.push({ pos: m.pos, kind, dist: d }); out.nearest = Math.min(out.nearest, d); }
+  }
+  if (out.launch) { const em = out.emitters.find((e) => e.launch); if (em) { out.emitter = em; out.code = em.code; } }
   return out;
 }

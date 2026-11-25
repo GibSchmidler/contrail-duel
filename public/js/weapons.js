@@ -178,23 +178,26 @@ export class Combat {
   }
   addChaff(p, v, popId, owner) { this.chaff.push({ pos: p, vel: v, t: 0, popId, owner }); }
 
-  // Remote missile puppets (data from network): [id, x, y, z, vx, vy, vz, code, flags]
-  syncRemoteMissiles(list, now) {
+  // Remote missile puppets (data from network): [id, x, y, z, vx, vy, vz, code, flags, targetSlot].
+  // `src` is the aircraft slot that fired them; `resolve(slot)` maps a slot to its aircraft.
+  syncRemoteMissiles(list, now, src, resolve) {
     const seen = new Set();
-    for (const [id, x, y, z, vx, vy, vz, code, flags = 1] of list) {
+    for (const [id, x, y, z, vx, vy, vz, code, flags = 1, tsl = -1] of list) {
       seen.add(id);
       let m = this.remoteMissiles.get(id);
       if (!m) {
         const key = WEAPON_BY_CODE[code] || 'aim9x';
-        m = { id, key, guidance: WEAPONS[key].guidance, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), mesh: this.getMesh(key), t: 0, remote: true, snapPos: new THREE.Vector3(), snapT: now };
+        m = { id, key, src, guidance: WEAPONS[key].guidance, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), mesh: this.getMesh(key), t: 0, remote: true, snapPos: new THREE.Vector3(), snapT: now };
         this.remoteMissiles.set(id, m);
       }
       m.snapPos.set(x, y, z); m.vel.set(vx, vy, vz); m.snapT = now;
       m.burning = !!(flags & 1);
       m.phase = flags & 2 ? 'active' : flags & 4 ? 'dl' : 'none';
+      m.owner = resolve ? resolve(src) : null;
+      m.target = resolve && tsl >= 0 ? resolve(tsl) : null;
     }
     for (const [id, m] of this.remoteMissiles) {
-      if (!seen.has(id)) { this.releaseMesh(m.mesh); this.remoteMissiles.delete(id); }
+      if (m.src === src && !seen.has(id)) { this.releaseMesh(m.mesh); this.remoteMissiles.delete(id); }
     }
   }
 
@@ -486,6 +489,17 @@ export class Combat {
     }
     this.tracerGeo.setDrawRange(0, n * 2);
     this.tracerAttr.needsUpdate = true; this.tracerColAttr.needsUpdate = true;
+  }
+
+  // Every missile fired by the other side (local sim or network puppets), for the RWR/MAWS.
+  enemyMissiles(side) {
+    const out = [];
+    for (const m of this.missiles) {
+      if (!m.owner || m.owner.side === side) continue;
+      out.push({ pos: m.pos, vel: m.vel, guidance: m.w.guidance, burning: m.burning, phase: m.decoy || m.lost ? 'none' : m.phase, target: m.target, owner: m.owner, src: m });
+    }
+    for (const m of this.remoteMissiles.values()) if (!m.owner || m.owner.side !== side) out.push(m);
+    return out;
   }
 
   // Missiles fired by `owner` (local sim or network puppets), in the form sensors.assessThreats wants.

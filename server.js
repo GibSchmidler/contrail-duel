@@ -1,4 +1,4 @@
-// Contrail Duel — static file server + WebSocket matchmaking/relay for 1v1 matches.
+// Contrail Duel — static file server + WebSocket rooms (up to 8 players) and message relay.
 // Run: npm install && npm start   (then open http://localhost:3000)
 const http = require('http');
 const fs = require('fs');
@@ -38,10 +38,13 @@ const server = http.createServer((req, res) => {
   sendFile(res, file);
 });
 
-// ---------------- Matchmaking ----------------
-const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
-const rooms = new Map(); // code -> host socket
-let waiting = null;      // quick-match queue (1 slot is enough for 1v1)
+// ---------------- Rooms ----------------
+// A room has a host (who runs the AI and owns the scenario) and up to 8 members.
+// Game traffic is relayed to everyone else in the room, or to one member when it carries `to`.
+const MAX_MEMBERS = 8;
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 });
+const rooms = new Map(); // code -> { code, host, members: Set<ws>, quick }
+let quickRoom = null;    // a quick-match room still waiting for its second player
 let nextId = 1;
 
 function send(ws, obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -53,40 +56,53 @@ function makeCode() {
   return c;
 }
 
-function unqueue(ws) {
-  if (waiting === ws) waiting = null;
-  if (ws.room && rooms.get(ws.room) === ws) rooms.delete(ws.room);
+function roomInfo(room) {
+  return { t: 'room', code: room.code, host: room.host.id, quick: !!room.quick, members: [...room.members].map((m) => ({ id: m.id, name: m.name })) };
+}
+function broadcastInfo(room) { const info = roomInfo(room); for (const m of room.members) send(m, info); }
+
+function createRoom(ws, quick) {
+  const room = { code: makeCode(), host: ws, members: new Set([ws]), quick };
+  rooms.set(room.code, room);
+  ws.room = room;
+  broadcastInfo(room);
+  return room;
+}
+function joinRoom(ws, room) {
+  if (room.members.size >= MAX_MEMBERS) { send(ws, { t: 'error', msg: 'That room is full (8 pilots).' }); return false; }
+  room.members.add(ws); ws.room = room;
+  broadcastInfo(room);
+  return true;
+}
+function leaveRoom(ws) {
+  const room = ws.room;
+  if (!room) return;
   ws.room = null;
-}
-
-function unpair(ws) {
-  const p = ws.partner;
-  if (p) { p.partner = null; send(p, { t: 'peerLeft' }); }
-  ws.partner = null;
-}
-
-function pair(host, guest) {
-  unqueue(host); unqueue(guest);
-  host.partner = guest; guest.partner = host;
-  send(host, { t: 'matched', role: 'host', opp: guest.name });
-  send(guest, { t: 'matched', role: 'guest', opp: host.name });
-  console.log(`match: ${host.name} vs ${guest.name}`);
+  room.members.delete(ws);
+  if (quickRoom === room) quickRoom = null;
+  if (room.host === ws) {
+    // the host runs the AI and the rules, so the room closes with it
+    for (const m of room.members) { m.room = null; send(m, { t: 'hostLeft' }); }
+    rooms.delete(room.code);
+    console.log(`room ${room.code} closed`);
+    return;
+  }
+  for (const m of room.members) send(m, { t: 'peerLeft', id: ws.id, name: ws.name });
+  broadcastInfo(room);
 }
 
 wss.on('connection', (ws) => {
   ws.id = nextId++;
   ws.name = 'Pilot' + ws.id;
-  ws.partner = null;
   ws.room = null;
-
   ws.rateWindow = Date.now();
   ws.rateCount = 0;
 
   ws.on('message', (raw) => {
-    // Basic flood protection: a normal client sends ~35 msgs/s.
+    // Flood protection: a host with 15 AI jets sends roughly 60 messages a second.
     const now = Date.now();
     if (now - ws.rateWindow > 1000) { ws.rateWindow = now; ws.rateCount = 0; }
-    if (++ws.rateCount > 150) { if (ws.rateCount > 600) ws.terminate(); return; }
+    if (++ws.rateCount > 300) { if (ws.rateCount > 1200) ws.terminate(); return; }
     const str = raw.toString();
     let msg;
     try { msg = JSON.parse(str); } catch { return; }
@@ -99,38 +115,45 @@ wss.on('connection', (ws) => {
         send(ws, { t: 'pong', c: msg.c });
         break;
       case 'quick':
-        unpair(ws); unqueue(ws);
-        if (waiting && waiting !== ws && waiting.readyState === 1) pair(waiting, ws);
-        else { waiting = ws; send(ws, { t: 'waiting' }); }
+        leaveRoom(ws);
+        if (quickRoom && quickRoom.host.readyState === 1 && quickRoom.members.size < 2) {
+          const r = quickRoom; quickRoom = null;
+          joinRoom(ws, r);
+          console.log(`quick match in ${r.code}`);
+        } else quickRoom = createRoom(ws, true);
         break;
-      case 'create': {
-        unpair(ws); unqueue(ws);
-        const code = makeCode();
-        rooms.set(code, ws); ws.room = code;
-        send(ws, { t: 'room', code });
+      case 'create':
+        leaveRoom(ws);
+        createRoom(ws, false);
         break;
-      }
       case 'join': {
-        const code = String(msg.code || '').toUpperCase().trim();
-        const host = rooms.get(code);
-        if (!host || host === ws || host.readyState !== 1) { send(ws, { t: 'error', msg: 'Room not found' }); break; }
-        unpair(ws);
-        pair(host, ws);
+        const room = rooms.get(String(msg.code || '').toUpperCase().trim());
+        if (!room || room.host.readyState !== 1) { send(ws, { t: 'error', msg: 'Room not found' }); break; }
+        if (ws.room === room) break;
+        leaveRoom(ws);
+        joinRoom(ws, room);
         break;
       }
       case 'cancel':
-        unqueue(ws);
-        break;
       case 'leave':
-        unpair(ws); unqueue(ws);
+        leaveRoom(ws);
         break;
-      default:
-        // Game traffic: relay verbatim to the opponent.
-        if (ws.partner && ws.partner.readyState === 1) ws.partner.send(str);
+      default: {
+        // Game traffic: stamp the sender and relay.
+        const room = ws.room;
+        if (!room) break;
+        msg.from = ws.id;
+        const out = JSON.stringify(msg);
+        if (msg.to != null) {
+          for (const m of room.members) if (m.id === msg.to && m.readyState === 1) m.send(out);
+        } else {
+          for (const m of room.members) if (m !== ws && m.readyState === 1) m.send(out);
+        }
+      }
     }
   });
 
-  ws.on('close', () => { unqueue(ws); unpair(ws); });
+  ws.on('close', () => leaveRoom(ws));
 });
 
 server.listen(PORT, () => {

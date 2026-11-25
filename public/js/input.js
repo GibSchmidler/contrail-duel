@@ -21,6 +21,7 @@ const BINDS = {
   camera: ['KeyV'],
   padlock: ['KeyT'],
   lookBack: ['KeyG'],
+  cycle: ['KeyN'],
   pause: ['Escape'],
   help: ['KeyH'],
 };
