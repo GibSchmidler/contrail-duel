@@ -1,6 +1,7 @@
 // WebSocket client + remote aircraft proxy with latency-compensated extrapolation.
 import * as THREE from 'three';
-import { packStores, unpackStores } from './arsenal.js';
+import { packStores, unpackStores, GUNS, RADARS } from './arsenal.js';
+import { JETS, JET_BY_CODE, jetOf, DEFAULT_JET } from './aircraft.js';
 
 export class Net {
   constructor() {
@@ -66,6 +67,7 @@ export function packState(plane, extra) {
     w: [r4(w.x), r4(w.y), r4(w.z)],
     th: r2(plane.eng), hp: Math.round(plane.hp), al: plane.alive ? 1 : 0,
     f: plane.firing ? 1 : 0, st: packStores(plane.stores), ab: plane.airbrake ? 1 : 0, rd: plane.radarMode,
+    ty: jetOf(plane.type).code,
   }, extra);
 }
 
@@ -83,6 +85,12 @@ export class RemotePlane {
     this.snap = null;
     this.hp = 100; this.alive = true; this.eng = 1; this.throttle = 1; this.firing = false; this.stores = []; this.radarMode = 0; this.airbrake = false;
     this.speed = 0; this.p = 0;
+    this.setType(DEFAULT_JET);
+  }
+  setType(key) {
+    this.type = JETS[key] ? key : DEFAULT_JET;
+    this.T = jetOf(this.type); this.F = this.T.flight;
+    this.gunT = GUNS[this.T.gun]; this.radarT = RADARS[this.T.radar];
   }
   get ab() { return this.eng > 1.001; }
   get missiles() { let n = 0; for (const s of this.stores) if (s) n++; return n; }
@@ -115,6 +123,7 @@ export class RemotePlane {
     } else { this.offset.set(0, 0, 0); this.pos.copy(_pp); this.prevPos.copy(_pp); this.quat.copy(_pq); }
     this.hp = m.hp; this.eng = m.th; this.throttle = m.th; this.firing = !!m.f; this.stores = unpackStores(m.st); this.radarMode = m.rd | 0; this.airbrake = !!m.ab;
     if (m.al && !this.alive) this.alive = true;
+    if (m.ty && JET_BY_CODE[m.ty] && JET_BY_CODE[m.ty] !== this.type) this.setType(JET_BY_CODE[m.ty]);
   }
 
   update(now, dt) {

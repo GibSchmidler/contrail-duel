@@ -388,6 +388,38 @@ export class Audio {
     this.nz(o, t, 3.0, { buf: this.pink, type: 'bandpass', f0: 1600, f1: 280, q: 0.9, g0: 0.9, attack: 0.05 }); // receding motor
     this.nz(o, t, 2.4, { buf: this.brown, f0: 700, f1: 120, g0: 0.6, attack: 0.04 });
   }
+  // Ejection: canopy jettison crack, then the seat's rocket motor.
+  eject(pos) {
+    if (!this.ctx || !this.enabled) return;
+    const sp = this.place(pos, 500);
+    if (!sp) return;
+    const t = this.ctx.currentTime + sp.delay;
+    const o = this.out(sp, t, 2.0, 0.4);
+    this.nz(o, t, 0.06, { type: 'highpass', f0: 1500, g0: 0.7 });
+    this.tn(o, t, 0.12, { f0: 180, f1: 60, g0: 0.5 });
+    this.nz(o, t + 0.2, 0.55, { buf: this.pink, type: 'bandpass', f0: 900, f1: 2400, q: 0.8, g0: 0.7, attack: 0.02 });
+    this.nz(o, t + 0.2, 0.5, { buf: this.brown, f0: 600, f1: 200, g0: 0.6, attack: 0.01 });
+  }
+  // Parachute snapping open.
+  chute(pos) {
+    if (!this.ctx || !this.enabled) return;
+    const sp = this.place(pos, 220);
+    if (!sp) return;
+    const t = this.ctx.currentTime + sp.delay;
+    const o = this.out(sp, t, 1.2, 0.3);
+    this.nz(o, t, 0.25, { buf: this.pink, type: 'lowpass', f0: 900, f1: 200, g0: 0.5, attack: 0.02 });
+    this.tn(o, t + 0.05, 0.2, { f0: 110, f1: 55, g0: 0.35 });
+  }
+  // Wreckage hitting the sea.
+  splash(pos, big) {
+    if (!this.ctx || !this.enabled) return;
+    const sp = this.place(pos, big ? 600 : 300);
+    if (!sp) return;
+    const t = this.ctx.currentTime + sp.delay;
+    const o = this.out(sp, t, 2.5, 0.5);
+    this.tn(o, t, 0.5, { f0: 90, f1: 35, g0: big ? 0.8 : 0.4 });
+    this.nz(o, t, big ? 2.0 : 1.0, { buf: this.pink, type: 'lowpass', f0: 2500, f1: 300, g0: big ? 0.9 : 0.5, attack: 0.01 });
+  }
   chaff() {
     if (!this.ctx || !this.enabled) return;
     const t = this.ctx.currentTime;

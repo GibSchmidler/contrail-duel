@@ -60,6 +60,29 @@ export function terrainHeight(x, z) {
 // Solid surface (sea level is solid too).
 export function groundHeight(x, z) { return Math.max(0, terrainHeight(x, z)); }
 
+// Highest point of the terrain, for a quick "both ends are above every mountain" test.
+let maxH = 0;
+for (let k = 0; k < heights.length; k++) if (heights[k] > maxH) maxH = heights[k];
+export const MAX_TERRAIN = maxH;
+
+// Terrain masking: true when the straight line from a to b clears the ground.
+// Samples every ~200 m (the terrain grid is 250 m), skipping the last stretch near
+// each end so a low aircraft is not hidden by the ground right under itself.
+export function lineOfSight(a, b, clearance = 0) {
+  if (a.y > MAX_TERRAIN && b.y > MAX_TERRAIN) return true;
+  const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+  const len = Math.hypot(dx, dy, dz);
+  const n = Math.ceil(len / 200);
+  if (n < 2) return true;
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    const y = a.y + dy * t;
+    if (y > MAX_TERRAIN) continue;
+    if (groundHeight(a.x + dx * t, a.z + dz * t) + clearance > y) return false;
+  }
+  return true;
+}
+
 export const SUN_DIR = new THREE.Vector3(0.45, 0.62, -0.64).normalize();
 export const FOG_COLOR = new THREE.Color(0xb9cfe4);
 

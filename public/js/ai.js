@@ -2,14 +2,14 @@
 // same control inputs a human uses, with skill-dependent reaction time, aim and G use.
 import * as THREE from 'three';
 import { computeLeadDir, airDensity } from './flight.js';
-import { VISUAL_RANGE, firstOf, countOf, flyout, launchZone } from './arsenal.js';
-import { groundHeight, ARENA_RADIUS } from './world.js';
+import { VISUAL_RANGE, WEAPONS, firstOf, countOf, flyout, launchZone } from './arsenal.js';
+import { groundHeight, lineOfSight, ARENA_RADIUS } from './world.js';
 
 export const SKILLS = {
-  drone:  { label: 'Target drone', loadout: 'knife', react: 0.5, maxPull: 0.55, aimTol: 0, gunRange: 0, missiles: false, mslCd: 99, flareP: 0, defend: false, notch: 0 },
-  rookie: { label: 'Rookie', loadout: 'classic', react: 0.45, maxPull: 0.7, aimTol: 0.035, aimNoise: 0.025, gunRange: 900, missiles: true, mslCd: 16, flareP: 0.35, defend: true, notch: 0.2, mrmFrac: 0.6 },
-  pilot:  { label: 'Veteran', loadout: 'balanced', react: 0.25, maxPull: 0.88, aimTol: 0.022, aimNoise: 0.012, gunRange: 1100, missiles: true, mslCd: 9, flareP: 0.75, defend: true, notch: 0.7, mrmFrac: 0.7 },
-  ace:    { label: 'Ace', loadout: 'balanced', react: 0.12, maxPull: 1.0, aimTol: 0.016, aimNoise: 0.004, gunRange: 1300, missiles: true, mslCd: 6, flareP: 0.95, defend: true, notch: 0.95, mrmFrac: 0.6 },
+  drone:  { label: 'Target drone', react: 0.5, maxPull: 0.55, aimTol: 0, gunRange: 0, missiles: false, mslCd: 99, flareP: 0, defend: false, notch: 0 },
+  rookie: { label: 'Rookie', react: 0.45, maxPull: 0.7, aimTol: 0.035, aimNoise: 0.025, gunRange: 900, missiles: true, mslCd: 16, flareP: 0.35, defend: true, notch: 0.2, mrmFrac: 0.6 },
+  pilot:  { label: 'Veteran', react: 0.25, maxPull: 0.88, aimTol: 0.022, aimNoise: 0.012, gunRange: 1100, missiles: true, mslCd: 9, flareP: 0.75, defend: true, notch: 0.7, mrmFrac: 0.7 },
+  ace:    { label: 'Ace', react: 0.12, maxPull: 1.0, aimTol: 0.016, aimNoise: 0.004, gunRange: 1300, missiles: true, mslCd: 6, flareP: 0.95, defend: true, notch: 0.95, mrmFrac: 0.6 },
 };
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -75,9 +75,11 @@ export class AIPilot {
     }
     // ---------- what the AI knows: its radar track or its eyes, like a human ----------
     const trueDist = target.pos.distanceTo(P.pos);
-    const known = P.radar.contact || trueDist < VISUAL_RANGE;
+    const eyes = trueDist < VISUAL_RANGE && lineOfSight(P.pos, target.pos);
+    const irst = P.irst && P.irst.contact;
+    const known = P.radar.contact || eyes || irst;
     if (known) {
-      const src = trueDist < VISUAL_RANGE || !P.radar.contact ? target : P.radar;
+      const src = eyes || (!P.radar.contact && !irst) ? target : P.radar.contact ? P.radar : P.irst;
       this.perceive(src.pos, src.vel);
       this.lastKnown = (this.lastKnown || new THREE.Vector3()).copy(src.pos);
     }
@@ -154,7 +156,7 @@ export class AIPilot {
     // ---------- offense ----------
     const rel = _t.copy(_tp).sub(P.pos);
     const dist = rel.length();
-    computeLeadDir(P.pos, P.vel, _tp, _tv, _lead);
+    computeLeadDir(P.pos, P.vel, _tp, _tv, _lead, P.gunT);
     const losDir = _d.copy(rel).divideScalar(dist);
     const closing = -rel.dot(_aim.copy(_tv).sub(P.vel)) / dist;
     const offBore = Math.acos(clamp(losDir.dot(P.fwd), -1, 1));
@@ -195,16 +197,18 @@ export class AIPilot {
     if (shotOk && dist < S.gunRange && aimErr < S.aimTol + 2.2 / Math.max(dist, 50) && P.gunAmmo > 0) this.burstT = 0.25 + Math.random() * 0.35;
     if (this.burstT > 0 && dist < S.gunRange * 1.15) o.gun = true;
     if (S.missiles && this.missileCd <= 0 && P.weapon === o.weapon) {
-      if (o.weapon === 'srm' && P.locked && nS > 0 && dist > 500 && dist < 4200) {
+      const sKey = firstOf(P.stores, 'srm'), mKey = firstOf(P.stores, 'mrm');
+      if (o.weapon === 'srm' && P.locked && nS > 0 && dist > 500 && dist < WEAPONS[sKey].seeker * 0.5) {
         o.missile = true; this.missileCd = S.mslCd * (0.7 + Math.random() * 0.6);
       } else if (o.weapon === 'mrm' && nM > 0 && P.radar.stt) {
         this.zoneT -= dt;
         if (this.zoneT <= 0 || !this.zone) {
           this.zoneT = 0.5;
-          this.zone = launchZone(flyout('aim120', P.speed, airDensity(P.pos.y)), -rel.dot(_tv) / dist, _tv.length());
+          this.zone = launchZone(flyout(mKey, P.speed, airDensity(P.pos.y)), -rel.dot(_tv) / dist, _tv.length());
         }
         if (dist < this.zone.rMax * S.mrmFrac && dist > this.zone.rMin && offBore < 0.35 && P.vel.y > -30 && agl > 700) {
-          o.missile = true; this.missileCd = S.mslCd * (1.2 + Math.random() * 0.6); this.supportT = 22;
+          // semi-active missiles need the radar lock all the way to impact
+          o.missile = true; this.missileCd = S.mslCd * (1.2 + Math.random() * 0.6); this.supportT = WEAPONS[mKey].guidance === 'sarh' ? 45 : 22;
         }
       }
     }

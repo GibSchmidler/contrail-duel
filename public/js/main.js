@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { Aircraft, computeLeadDir, airDensity } from './flight.js';
-import { World, groundHeight, ARENA_RADIUS } from './world.js';
+import { World, groundHeight, lineOfSight, ARENA_RADIUS } from './world.js';
 import { buildJet } from './models.js';
 import { Effects } from './effects.js';
-import { Combat, GUN_RATE } from './weapons.js';
-import { updateRadar, updateIrLock, assessThreats } from './sensors.js';
-import { WEAPONS, GUN, VISUAL_RANGE, firstOf, countOf, nextStation, flyout, launchZone } from './arsenal.js';
+import { Combat } from './weapons.js';
+import { updateRadar, updateIrLock, updateIrst, assessThreats } from './sensors.js';
+import { WEAPONS, GUNS, RADARS, VISUAL_RANGE, firstOf, countOf, nextStation, flyout, launchZone } from './arsenal.js';
+import { JETS, COUNTRIES, JETS_OF, jetOf, DEFAULT_JET } from './aircraft.js';
+import { Wrecks } from './wreck.js';
 import { Input } from './input.js';
 import { AIPilot, SKILLS } from './ai.js';
 import { Hud } from './hud.js';
@@ -15,9 +17,11 @@ import { Net, RemotePlane, packState } from './net.js';
 const $ = (id) => document.getElementById(id);
 
 // ---------------- settings ----------------
-const settings = Object.assign({ name: 'Viper', invert: false, rounds: 3, difficulty: 'pilot', sound: true, loadout: 'balanced', engage: 'bvr' }, (() => {
+const settings = Object.assign({ name: 'Viper', invert: false, rounds: 3, difficulty: 'pilot', sound: true, jet: DEFAULT_JET, loadout: 'air', aiJet: 'random', engage: 'bvr' }, (() => {
   try { return JSON.parse(localStorage.getItem('contrail-settings') || '{}'); } catch { return {}; }
 })());
+if (!JETS[settings.jet]) settings.jet = DEFAULT_JET;
+if (!JETS[settings.jet].loadouts[settings.loadout]) settings.loadout = JETS[settings.jet].loadoutKeys[0];
 function saveSettings() { try { localStorage.setItem('contrail-settings', JSON.stringify(settings)); } catch {} }
 
 // ---------------- engine setup ----------------
@@ -34,10 +38,20 @@ const hud = new Hud($('hud'));
 const input = new Input();
 const net = new Net();
 
-const myJet = buildJet({ body: 0x8f9cab, accent: 0x2f6fd0 });
-const oppJet = buildJet({ body: 0x9c968c, accent: 0xc8372d });
-scene.add(myJet.group, oppJet.group);
-oppJet.group.visible = false;
+// Jet meshes are rebuilt when a player changes aircraft type.
+const jets = { me: null, opp: null };
+function jetModel(slot, type) {
+  if (jets[slot] && jets[slot].type === type) return jets[slot];
+  if (jets[slot]) { scene.remove(jets[slot].group); jets[slot].dispose(); }
+  const j = buildJet(type);
+  const tip = j.model.wing.pts.reduce((a, b) => (b[0] > a[0] || (b[0] === a[0] && b[1] > a[1]) ? b : a));
+  j.tip = [tip[0] + 0.1, j.model.wing.y || 0, tip[1]];
+  j.group.visible = false;
+  scene.add(j.group);
+  jets[slot] = j;
+  return j;
+}
+jetModel('me', settings.jet); jetModel('opp', DEFAULT_JET);
 
 let W = 1, H = 1;
 function resize() {
@@ -67,7 +81,6 @@ const G = {
   padlock: false,
   camQuat: new THREE.Quaternion(),
   sendT: 0,
-  deathPos: null,
   time: 0,
   oppName: 'BANDIT',
   netId: Math.random().toString(36).slice(2, 7),
@@ -77,6 +90,8 @@ const G = {
   engage: 'bvr',
   threat: null,
   dlz: null, dlzT: 0,
+  death: null, oppDeath: null, camFocus: new THREE.Vector3(), slowT: 0, timeScale: 1, shake: 0,
+  eyes: false, aiJet: DEFAULT_JET,
 };
 G.me.netId = G.netId;
 
@@ -98,22 +113,54 @@ const combat = new Combat(scene, effects, audio, {
 function applyDamage(plane, dmg, kind) {
   if (!plane.alive) return;
   plane.hp -= dmg;
-  if (plane === G.me) { hud.damageT = Math.min(0.5, hud.damageT + (kind === 'msl' ? 0.5 : 0.12)); audio.damage(kind); }
+  if (plane === G.me) {
+    hud.damageT = Math.min(0.5, hud.damageT + (kind === 'msl' ? 0.5 : 0.12)); audio.damage(kind);
+    G.shake = Math.max(G.shake, kind === 'msl' ? 1.6 : 0.25);
+  }
   if (plane.hp <= 0) killPlane(plane, kind);
 }
 
-function killPlane(plane, cause) {
+// ---------------- deaths ----------------
+const wrecks = new Wrecks(scene, effects, audio, {
+  shake: (pos, power) => shakeAt(pos, power),
+  boom: (pos, big) => { audio.explosion(pos, big); shakeAt(pos, big ? 0.8 : 0.3); },
+  splash: (pos, big) => audio.splash(pos, big),
+  eject: (pos) => audio.eject(pos),
+  chute: (pos) => {
+    audio.chute(pos);
+    const mine = G.death && G.death.handle.pilot && G.death.handle.pilot.pos === pos;
+    const theirs = G.oppDeath && G.oppDeath.handle.pilot && G.oppDeath.handle.pilot.pos === pos;
+    if (mine) flash('GOOD CHUTE — you ejected safely', 3);
+    else if (theirs && G.me.alive && pos.distanceTo(G.me.pos) < VISUAL_RANGE) flash('GOOD CHUTE — the bandit ejected', 2.5);
+  },
+});
+function shakeAt(pos, power) {
+  const d = camera.position.distanceTo(pos);
+  const k = Math.max(0, 1 - d / 2500);
+  G.shake = Math.max(G.shake, power * 3 * k * k);
+}
+
+const DEATH_TEXT = { crash: 'CRASHED', bounds: 'LOST', gun: 'SHOT DOWN — guns', msl: 'SHOT DOWN — missile' };
+function killPlane(plane, cause, seed = (Math.random() * 2147483647) | 0) {
   if (!plane.alive) return;
   plane.hp = 0; plane.alive = false; plane.firing = false;
-  effects.explosion(plane.pos, plane.vel, true);
+  const handle = wrecks.spawn({ type: plane.type, pos: plane.pos.clone(), vel: plane.vel.clone(), quat: plane.quat.clone(), cause, seed });
   audio.explosion(plane.pos, true);
+  shakeAt(plane.pos, cause === 'msl' ? 1.3 : 0.7);
+  // a moment of slow motion when it happens up close (practice only: online time can't bend)
+  if (G.mode === 'ai' && (plane === G.me || camera.position.distanceTo(plane.pos) < 3500)) G.slowT = 2.4;
   if (plane === G.me) {
-    G.deathPos = plane.pos.clone();
-    hud.showBanner(cause === 'crash' ? 'CRASHED' : cause === 'bounds' ? 'LOST' : 'SHOT DOWN', '', '#ff6a5a', 3);
-    if (G.mode === 'online') net.send({ t: 'dead', c: cause, p: [plane.pos.x, plane.pos.y, plane.pos.z] });
+    G.death = { handle, ang: Math.atan2(-plane.vel.z, -plane.vel.x) + 0.7 };
+    G.camFocus.copy(plane.pos);
+    hud.showBanner(DEATH_TEXT[cause] || 'SHOT DOWN', '', '#ff6a5a', 3.5);
+    if (G.mode === 'online') {
+      const r = (v) => [v.x, v.y, v.z].map((x) => Math.round(x * 100) / 100);
+      net.send({ t: 'dead', c: cause, p: r(plane.pos), v: r(plane.vel), q: [plane.quat.x, plane.quat.y, plane.quat.z, plane.quat.w], sd: seed });
+    }
     registerDeath('me');
   } else {
-    hud.showBanner(cause === 'crash' ? 'BANDIT CRASHED' : 'SPLASH ONE', `${G.oppName} destroyed`, '#9dffb8', 3);
+    G.oppDeath = { handle };
+    hud.showBanner(cause === 'crash' ? 'BANDIT CRASHED' : 'SPLASH ONE', `${G.oppName} ${jetOf(plane.type).name} destroyed`, '#9dffb8', 3.5);
     registerDeath('opp');
   }
 }
@@ -124,7 +171,7 @@ function registerDeath(who) {
   if (!isAuthority()) return;
   if (G.phase !== 'fight' && G.phase !== 'roundEnd') return;
   if (who === 'me') G.scores.opp++; else G.scores.me++;
-  if (G.phase === 'fight') setPhase('roundEnd', 3.5);
+  if (G.phase === 'fight') setPhase('roundEnd', 7.5); // time to watch the wreck go down
   sendPhase();
 }
 
@@ -151,12 +198,16 @@ function startRound() {
   G.round++;
   combat.clear();
   effects.clear();
+  wrecks.clear();
+  G.death = null; G.oppDeath = null; G.slowT = 0; G.shake = 0;
   const mySide = G.mode === 'online' && G.role === 'guest' ? 1 : 0;
   const spd = G.engage === 'merge' ? 210 : 250;
+  G.me.setType(settings.jet);
   G.me.reset(spawnPos(mySide), SPAWN_QUAT[mySide], spd, settings.loadout);
   G.me.wantStt = false;
   if (G.mode === 'ai') {
-    G.opp.reset(spawnPos(1 - mySide), SPAWN_QUAT[1 - mySide], spd, G.ai.skill.loadout);
+    G.opp.setType(G.aiJet);
+    G.opp.reset(spawnPos(1 - mySide), SPAWN_QUAT[1 - mySide], spd, JETS[G.aiJet].loadoutKeys[0]);
     G.opp.wantStt = false;
     G.ai.reset();
   } else if (G.opp) {
@@ -166,14 +217,20 @@ function startRound() {
   G.threat = null; G.dlz = null;
   input.reset();
   G.camQuat.copy(G.me.quat);
-  G.deathPos = null;
   setPhase('countdown', 3);
   hud.showBanner(`ROUND ${G.round}`, '', '#ffffff', 2);
 }
 
+function pickAiJet() {
+  if (JETS[settings.aiJet]) return settings.aiJet;
+  const keys = Object.keys(JETS);
+  if (settings.aiJet && settings.aiJet.startsWith('c:')) { const k = JETS_OF(settings.aiJet.slice(2)); return k[Math.floor(Math.random() * k.length)]; }
+  return keys[Math.floor(Math.random() * keys.length)];
+}
 function startPractice() {
   G.mode = 'ai';
-  G.opp = new Aircraft(SKILLS[settings.difficulty].label);
+  G.aiJet = pickAiJet();
+  G.opp = new Aircraft(SKILLS[settings.difficulty].label, G.aiJet);
   G.oppName = SKILLS[settings.difficulty].label.toUpperCase();
   G.ai = new AIPilot(G.opp, settings.difficulty);
   G.scores = { me: 0, opp: 0 }; G.round = 0; G.roundsToWin = settings.rounds;
@@ -203,8 +260,9 @@ function enterGame() {
 function quitToMenu(reason) {
   if (G.mode === 'online') net.send({ t: 'leave' });
   G.mode = null; G.phase = 'menu'; G.paused = false; G.opp = null; G.ai = null;
-  combat.clear();
-  oppJet.group.visible = false;
+  combat.clear(); wrecks.clear(); effects.clear();
+  G.death = null; G.oppDeath = null; G.slowT = 0;
+  jets.opp.group.visible = false;
   showScreen('menu');
   if (reason) toast(reason);
 }
@@ -246,7 +304,9 @@ net.on('hit', (m) => { if (G.mode === 'online' && (G.phase === 'fight' || G.phas
 net.on('dead', (m) => {
   if (G.mode !== 'online' || !G.opp) return;
   if (m.p) G.opp.pos.set(m.p[0], m.p[1], m.p[2]);
-  if (G.opp.alive) killPlane(G.opp, m.c);
+  if (m.v) G.opp.vel.set(m.v[0], m.v[1], m.v[2]);
+  if (m.q) G.opp.quat.set(m.q[0], m.q[1], m.q[2], m.q[3]);
+  if (G.opp.alive) killPlane(G.opp, m.c, m.sd); // same seed: both screens see the same break-up
 });
 net.on('fl', (m) => {
   if (G.mode !== 'online' || !G.opp) return;
@@ -295,36 +355,39 @@ const pack = (list) => list.map((f) => [f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.ve
 function handleWeapons(plane, ctl, target, dt, isLocalHuman) {
   const hot = G.phase === 'fight' || G.phase === 'roundEnd';
   plane.missileCd -= dt; plane.flareCd -= dt; plane.chaffCd = (plane.chaffCd || 0) - dt;
-  // M61: electric motor spins the barrels up before rounds come out at the full 100/s
+  // Gatling guns (M61) spin up before reaching full rate; revolver and single-barrel guns don't
+  const gun = plane.gunT;
   const trigger = hot && plane.alive && ctl.gun && plane.gunAmmo > 0;
-  plane.gunSpin = trigger ? Math.min(1, plane.gunSpin + dt / GUN.spinUp) : Math.max(0, plane.gunSpin - dt / 0.5);
+  plane.gunSpin = trigger ? Math.min(1, plane.gunSpin + dt / Math.max(0.01, gun.spinUp)) : Math.max(0, plane.gunSpin - dt / 0.5);
   plane.firing = trigger;
   if (trigger) {
-    const rate = GUN_RATE * plane.gunSpin;
+    const rate = gun.rate * plane.gunSpin;
     plane.gunAcc += dt * rate;
     let n = 0;
     while (plane.gunAcc >= 1 && plane.gunAmmo > 0) {
       plane.gunAcc -= 1; plane.gunAmmo--;
       combat.fireBullet(plane, true, (n++ / (dt * rate + 1)) * dt);
     }
-    if (plane.gunSpin > 0.2) effects.muzzle(plane.pos.clone().addScaledVector(plane.fwd, 7.5).addScaledVector(plane.right, -0.7).addScaledVector(plane.up, 0.35), plane.vel);
+    if (plane.gunSpin > 0.2) effects.muzzle(combat.gunMuzzle(plane), plane.vel);
   } else plane.gunAcc = 0;
 
   if (!hot || !plane.alive) return;
   if (ctl.missile && plane.missileCd <= 0) {
     const cls = plane.weapon;
     const key = firstOf(plane.stores, cls);
-    if (!key) { if (isLocalHuman) flash(cls === 'mrm' ? 'NO AIM-120 LEFT — press 1 for Sidewinders' : 'NO SIDEWINDERS LEFT'); }
+    const w = key && WEAPONS[key];
+    if (!key) { if (isLocalHuman) flash(cls === 'mrm' ? 'NO RADAR MISSILES LEFT — press 1 for IR missiles' : 'NO IR MISSILES LEFT'); }
     else if (cls === 'srm' && !plane.locked) { if (isLocalHuman) flash('NO LOCK — wait for the steady tone'); }
     else if (cls === 'mrm' && !plane.radar.contact) { if (isLocalHuman) flash('NO RADAR TRACK — point the nose at the bandit'); }
+    else if (w.guidance === 'sarh' && !plane.radar.stt) { if (isLocalHuman) flash(`${w.name} IS SEMI-ACTIVE — lock the radar first (TAB)`); }
     else {
-      const st = nextStation(plane.stores, cls, plane.lastSide);
+      const st = nextStation(plane.stores, cls, plane.lastSide, plane.T.fireOrder);
       plane.stores[st] = null; plane.updateStores(); plane.lastSide = st % 2;
       combat.launchMissile(plane, target, key, st);
       plane.missileCd = 0.8;
       if (cls === 'srm') plane.lockProgress = 0.6;
       audio.launch(isLocalHuman ? null : plane.pos);
-      if (isLocalHuman) flash(cls === 'mrm' ? (plane.radar.stt ? 'FOX 3 — keep the lock for datalink' : 'FOX 3 — no lock, no datalink') : 'FOX 2', 1.6);
+      if (isLocalHuman) flash(w.guidance === 'sarh' ? `FOX 1 — ${w.name}: hold the lock until impact` : cls === 'mrm' ? (plane.radar.stt ? `FOX 3 — ${w.name}, keep the lock for datalink` : `FOX 3 — ${w.name}, no lock, no datalink`) : `FOX 2 — ${w.name}`, 1.8);
     }
   }
   if (ctl.flare && plane.flareCd <= 0 && plane.flares > 0) {
@@ -359,14 +422,23 @@ function updateCamera(dt) {
     camera.lookAt(0, 1400, 0);
     return;
   }
-  if (!P.alive && G.deathPos) {
-    const t = G.time * 0.25;
-    camera.position.set(G.deathPos.x + Math.cos(t) * 160, G.deathPos.y + 50, G.deathPos.z + Math.sin(t) * 160);
+  if (!P.alive && G.death) {
+    // death camera: ride along with the falling wreck, then find the parachute
+    const D = G.death, h = D.handle, pl = h.pilot;
+    const onPilot = pl && pl.state !== 'wait' && h.t > h.ejectAt + 1.1;
+    const target = onPilot ? pl.pos : h.main ? h.main.pos : G.camFocus;
+    G.camFocus.lerp(target, 1 - Math.exp(-dt * (onPilot ? 2.2 : 7)));
+    D.ang += dt * 0.2;
+    const dist = onPilot ? 26 : 34 + 34 * Math.min(1, h.t / 3.5);
+    const f = G.camFocus;
+    camera.position.set(f.x + Math.cos(D.ang) * dist, f.y + 6 + dist * 0.28, f.z + Math.sin(D.ang) * dist);
+    const gh = groundHeight(camera.position.x, camera.position.z) + 4;
+    if (camera.position.y < gh) camera.position.y = gh;
     camera.up.set(0, 1, 0);
-    camera.lookAt(G.deathPos);
+    camera.lookAt(f);
     return;
   }
-  const target = G.opp && G.opp.alive && (G.opp.pos.distanceTo(P.pos) < VISUAL_RANGE || P.radar.contact) ? G.opp : null;
+  const target = G.opp && G.opp.alive && (G.eyes || P.radar.contact || P.irst.contact) ? G.opp : null;
   const lookBack = input.held('lookBack');
   // desired orientation
   if (G.padlock && target) {
@@ -404,7 +476,9 @@ function camSpace(v) { return v.clone().applyMatrix4(camera.matrixWorldInverse);
 
 // ---------------- per-plane visual effects ----------------
 const _wt = new THREE.Vector3();
-function planeEffects(plane, jet, dt) {
+function planeEffects(plane, slot, dt) {
+  const jet = jetModel(slot, plane.type);
+  jet.group.visible = plane.alive;
   jet.group.position.copy(plane.pos);
   jet.group.quaternion.copy(plane.quat);
   jet.setThrottle(plane.eng ?? plane.throttle, G.time);
@@ -416,12 +490,12 @@ function planeEffects(plane, jet, dt) {
   if (g > 5 || alpha > 0.22) {
     const a = Math.min(0.5, (g - 4.5) * 0.08 + Math.max(0, alpha - 0.2));
     for (const s of [-1, 1]) {
-      _wt.set(s * 5.4, 0, 3.0).applyQuaternion(plane.quat).add(plane.pos);
+      _wt.set(s * jet.tip[0], jet.tip[1], jet.tip[2]).applyQuaternion(plane.quat).add(plane.pos);
       effects.vapor(_wt, plane.vel, a);
     }
   }
   if (plane.hp < 50) {
-    _wt.set(0, 0.5, 6).applyQuaternion(plane.quat).add(plane.pos);
+    _wt.set(0, 0.5, jet.model.nozzles[0].z - 1.5).applyQuaternion(plane.quat).add(plane.pos);
     if (Math.random() < dt * 30) effects.damageSmoke(_wt, plane.vel, plane.hp);
   }
 }
@@ -447,17 +521,31 @@ function frame(now) {
   const simRunning = inGame && !(G.paused && G.mode === 'ai');
   input.enabled = !G.paused && G.me.alive;
 
-  if (simRunning) step(dt, now);
+  // slow motion after a close kill (practice only): hold, then ease back to real time
+  if (G.slowT > 0 && G.mode === 'ai') {
+    G.slowT -= dt;
+    const e = 2.4 - G.slowT;
+    G.timeScale = e < 0.9 ? 0.25 : 0.25 + 0.75 * Math.min(1, (e - 0.9) / 1.5);
+  } else G.timeScale = 1;
+  const sdt = dt * G.timeScale;
+
+  if (simRunning) step(sdt, now);
 
   updateCamera(dt);
+  // camera shake from nearby explosions
+  if (G.shake > 0.01) {
+    camera.position.x += (Math.random() - 0.5) * G.shake; camera.position.y += (Math.random() - 0.5) * G.shake; camera.position.z += (Math.random() - 0.5) * G.shake;
+    camera.rotateZ((Math.random() - 0.5) * G.shake * 0.01);
+    G.shake *= Math.exp(-dt * 3.5);
+  }
   world.update(camera);
-  effects.update(simRunning ? dt : 0);
+  effects.update(simRunning ? sdt : 0);
+  wrecks.update(simRunning ? sdt : 0);
   if (inGame) {
-    planeEffects(G.me, myJet, dt);
-    myJet.group.visible = G.me.alive;
-    if (G.opp) { planeEffects(G.opp, oppJet, dt); oppJet.group.visible = G.opp.alive; }
+    planeEffects(G.me, 'me', sdt);
+    if (G.opp) planeEffects(G.opp, 'opp', sdt); else jets.opp.group.visible = false;
   } else {
-    myJet.group.visible = false; oppJet.group.visible = false;
+    jets.me.group.visible = false; jets.opp.group.visible = false;
   }
 
   drawHud(dt);
@@ -543,15 +631,21 @@ function step(dt, now) {
   }
   const hadStt = P.radar.stt;
   updateRadar(P, O, dt, P.wantStt, combat.chaff);
-  if (hadStt && !P.radar.stt && P.radar.lostMsg > 0) flash(P.radar.notched ? 'LOCK BROKEN — bandit in the notch' : 'LOCK BROKEN', 1.6);
+  if (hadStt && !P.radar.stt && P.radar.lostMsg > 0) flash(P.radar.notched ? 'LOCK BROKEN — bandit in the notch' : P.radar.masked ? 'LOCK BROKEN — bandit behind terrain' : 'LOCK BROKEN', 1.6);
   if (P.radar.lostMsg > 0) P.radar.lostMsg -= dt;
+  // eyes need a clear line of sight too: a ridge hides the bandit from view
+  G.eyes = !!(O && O.alive && P.alive && O.pos.distanceTo(P.pos) < VISUAL_RANGE && lineOfSight(P.pos, O.pos));
+  updateIrst(P, O, dt);
   const srmKey = P.weapon === 'srm' ? firstOf(P.stores, 'srm') : null;
-  updateIrLock(P, O, dt, srmKey, (G.padlock && O && O.pos.distanceTo(P.pos) < VISUAL_RANGE) || P.radar.stt);
+  // the IR seeker can be cued off-boresight by the helmet sight, or slaved to the radar or IRST
+  updateIrLock(P, O, dt, srmKey, (G.padlock && G.eyes && P.T.hmd) || P.radar.stt || P.irst.fresh);
   handleWeapons(P, { gun: input.held('gun'), missile: input.tapped('missile'), flare: input.held('flare'), chaff: input.held('chaff') }, O, dt, true);
   if (aiOut) {
     O.weapon = aiOut.weapon;
     updateRadar(O, P, dt, aiOut.wantStt, combat.chaff);
-    updateIrLock(O, P, dt, O.weapon === 'srm' ? firstOf(O.stores, 'srm') : null, O.radar.stt);
+    updateIrst(O, P, dt);
+    const aiEyes = O.pos.distanceTo(P.pos) < VISUAL_RANGE && O.T.hmd;
+    updateIrLock(O, P, dt, O.weapon === 'srm' ? firstOf(O.stores, 'srm') : null, O.radar.stt || O.irst.fresh || aiEyes);
     handleWeapons(O, aiOut, P, dt, false);
   }
   G.threat = O ? assessThreats(P, O, combat.missilesFrom(O)) : null;
@@ -569,9 +663,9 @@ function step(dt, now) {
   }
   if (G.mode === 'online' && O && O.alive && O.firing) {
     // remote tracers are visual only — the shooter's client detects hits
-    O.gunAcc += dt * GUN_RATE;
+    O.gunAcc += dt * O.gunT.rate;
     while (O.gunAcc >= 1) { O.gunAcc -= 1; combat.fireBullet(O, false); }
-    effects.muzzle(O.pos.clone().addScaledVector(O.fwd, 7.5), O.vel);
+    effects.muzzle(combat.gunMuzzle(O), O.vel);
   }
 
   const planes = O ? [P, O] : [P];
@@ -597,7 +691,7 @@ function drawHud(dt) {
   const oppDist = oppAlive ? O.pos.distanceTo(P.pos) : 0;
   const R = P.radar;
   // what the pilot actually knows: eyes inside visual range, radar track beyond it
-  const visual = oppAlive && oppDist < VISUAL_RANGE;
+  const visual = oppAlive && G.eyes;
   const tracked = oppAlive && R.contact;
   const gunDist = oppAlive && (R.stt || oppDist < 2500) ? Math.min(1500, Math.max(300, oppDist)) : 1000;
   const gunPoint = P.pos.clone().addScaledVector(P.fwd, gunDist);
@@ -607,8 +701,8 @@ function drawHud(dt) {
   if (oppAlive) {
     const rel = O.pos.clone().sub(P.pos);
     closure = -rel.dot(O.vel.clone().sub(P.vel)) / Math.max(oppDist, 1);
-    if (oppDist < 2500 && rel.dot(P.fwd) > 0) {
-      const dir = computeLeadDir(P.pos, P.vel, O.pos, O.vel, new THREE.Vector3());
+    if (oppDist < 2500 && rel.dot(P.fwd) > 0 && P.gunT.rate > 0 && P.gunAmmo > 0) {
+      const dir = computeLeadDir(P.pos, P.vel, O.pos, O.vel, new THREE.Vector3(), P.gunT);
       leadPoint = P.pos.clone().addScaledVector(dir, oppDist);
     }
   }
@@ -624,9 +718,10 @@ function drawHud(dt) {
   // my AIM-120s in flight: time until the seeker goes active, or ACTIVE
   const myMrm = [];
   for (const m of combat.missiles) {
-    if (m.owner !== P || m.w.guidance !== 'radar') continue;
+    if (m.owner !== P || (m.w.guidance !== 'radar' && m.w.guidance !== 'sarh')) continue;
     let status;
-    if (m.lost || m.decoy) status = 'LOST';
+    if (m.w.guidance === 'sarh') status = m.lost || m.decoy || !P.radar.stt ? 'LOST' : 'ILL';
+    else if (m.lost || m.decoy) status = 'LOST';
     else if (m.phase === 'active') status = 'ACT';
     else {
       const d = m.pos.distanceTo(m.est) - m.w.pitbull;
@@ -635,10 +730,10 @@ function drawHud(dt) {
     myMrm.push(status);
   }
   let hint = null;
-  if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · 1/2 select AIM-9 / AIM-120 · TAB radar lock · X fire · C flares · Z chaff · H help';
+  if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · 1/2 select IR / radar missile · TAB radar lock · X fire · C flares · Z chaff · H help';
   hud.draw({
     active: true, plane: P, opp: oppAlive ? O : null, oppDist, oppName: G.oppName, myName: (settings.name || 'YOU').toUpperCase(),
-    visual, tracked, radar: R, padlock: G.padlock,
+    visual, tracked, radar: R, padlock: G.padlock, irst: P.irst,
     project, camSpace, camPos: camera.position, gunPoint, fpmPoint, leadPoint, closure,
     lock: { inCone: P.inCone, progress: P.lockProgress, locked: P.locked }, seekerPx,
     threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm,
@@ -687,16 +782,89 @@ function readMenu() {
   settings.difficulty = $('difficulty').value;
   settings.sound = $('sound').checked;
   settings.loadout = $('loadout').value;
+  settings.aiJet = $('aiJet').value;
   settings.engage = $('engage').value;
   saveSettings();
 }
+// ---- aircraft picker ----
+const COUNTRY_KEYS = Object.keys(COUNTRIES);
+let hangarCountry = JETS[settings.jet].country;
+function jetSpecs(T) {
+  const F = T.flight, R = RADARS[T.radar], G0 = GUNS[T.gun];
+  const realMass = F.mass / 0.875;
+  const tw = F.thrAB / (realMass * 9.81);
+  const chip = (txt, on = true) => `<i class="${on ? '' : 'no'}">${txt}</i>`;
+  const rcs = T.rcs < 0.01 ? 'very stealthy' : T.rcs < 0.1 ? 'stealthy' : T.rcs < 0.5 ? 'reduced RCS' : T.rcs < 3 ? 'medium RCS' : 'large RCS';
+  return [
+    chip(`T/W ${tw.toFixed(2)}`),
+    chip(`${R.name} · ${Math.round(R.range / 1000)} km`),
+    chip(`RCS ${T.rcs < 0.01 ? T.rcs.toFixed(4) : T.rcs} m² (${rcs})`),
+    chip(T.irst ? `IRST ${Math.round(T.irst / 1000)} km` : 'IRST', !!T.irst),
+    chip('Missile warning', !!T.maws),
+    chip('Helmet sight', !!T.hmd),
+    chip(T.flight.tvc ? 'Thrust vectoring' : 'Thrust vectoring', !!T.flight.tvc),
+    chip(`Jamming ${Math.round(T.ecm * 100)}%`, T.ecm > 0),
+    chip(G0.rate > 0 ? `${G0.name} · ${T.ammo} rds` : 'No gun', G0.rate > 0),
+  ].join('');
+}
+function loadoutText(L) {
+  const n = {};
+  for (const k of L.st) if (k) n[k] = (n[k] || 0) + 1;
+  return Object.entries(n).map(([k, c]) => `${c}× ${WEAPONS[k].name}`).join(', ');
+}
+function buildHangar() {
+  const tabs = $('countryTabs');
+  tabs.innerHTML = '';
+  for (const c of COUNTRY_KEYS) {
+    const b = document.createElement('button');
+    b.textContent = COUNTRIES[c].name;
+    b.className = c === hangarCountry ? 'on' : '';
+    b.onclick = () => { hangarCountry = c; if (JETS[settings.jet].country !== c) settings.jet = JETS_OF(c)[0]; settings.loadout = JETS[settings.jet].loadoutKeys[0]; saveSettings(); buildHangar(); };
+    tabs.appendChild(b);
+  }
+  $('countryBlurb').textContent = COUNTRIES[hangarCountry].blurb;
+  const cards = $('jetCards');
+  cards.innerHTML = '';
+  for (const k of JETS_OF(hangarCountry)) {
+    const T = JETS[k];
+    const b = document.createElement('button');
+    b.className = 'card' + (k === settings.jet ? ' on' : '');
+    b.innerHTML = `<b>${T.name}</b><span>${T.nick}${T.stealth ? ' · <em class="stealth">stealth</em>' : ''}</span>`;
+    b.onclick = () => { settings.jet = k; settings.loadout = T.loadoutKeys[0]; saveSettings(); buildHangar(); };
+    cards.appendChild(b);
+  }
+  const T = JETS[settings.jet];
+  $('jetInfo').innerHTML = `${T.desc}<div class="specs">${jetSpecs(T)}</div>`;
+  const sel = $('loadout');
+  sel.innerHTML = '';
+  for (const lk of T.loadoutKeys) {
+    const o = document.createElement('option');
+    o.value = lk; o.textContent = `${T.loadouts[lk].name} — ${loadoutText(T.loadouts[lk])}`;
+    sel.appendChild(o);
+  }
+  if (!T.loadouts[settings.loadout]) settings.loadout = T.loadoutKeys[0];
+  sel.value = settings.loadout;
+  const ai = $('aiJet');
+  if (!ai.options.length) {
+    const add = (v, t, parent = ai) => { const o = document.createElement('option'); o.value = v; o.textContent = t; parent.appendChild(o); };
+    add('random', 'Random (any nation)');
+    for (const c of COUNTRY_KEYS) {
+      const g = document.createElement('optgroup'); g.label = COUNTRIES[c].name; ai.appendChild(g);
+      add('c:' + c, `Random ${COUNTRIES[c].short} jet`, g);
+      for (const k of JETS_OF(c)) add(k, JETS[k].name, g);
+    }
+  }
+  ai.value = settings.aiJet;
+  if (ai.value !== settings.aiJet) { settings.aiJet = 'random'; ai.value = 'random'; }
+}
+
 function initMenu() {
   $('callsign').value = settings.name;
   $('invert').checked = settings.invert;
   $('rounds').value = String(settings.rounds);
   $('difficulty').value = settings.difficulty;
   $('sound').checked = settings.sound;
-  $('loadout').value = settings.loadout;
+  buildHangar();
   $('engage').value = settings.engage;
   $('btnPractice').onclick = () => { audio.start(); readMenu(); startPractice(); };
   $('btnQuick').onclick = () => online('quick');
@@ -728,4 +896,4 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio };
+window.__game = { G, combat, camera, audio, wrecks, jets };

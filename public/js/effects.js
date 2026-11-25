@@ -128,11 +128,11 @@ export class Effects {
   }
 
   // Only a burning motor leaves a plume; once it burns out the missile is nearly invisible.
-  missileTrail(p, v, burning, key) {
+  missileTrail(p, v, burning, key, smoke = 0.5) {
     if (!burning) return;
-    const big = key === 'aim120';
+    const big = key === 'aim120' || key === 'aim120d' || key === 'r27er';
     this.fire.emit(p.x, p.y, p.z, v.x * 0.2, v.y * 0.2, v.z * 0.2, 0.08, big ? 2.0 : 1.6, 0.6, FIRE0, FIRE1, 0.9);
-    this.smoke.emit(p.x + R(), p.y + R(), p.z + R(), R() * 2, R() * 2, R() * 2, 3.5 + Math.random(), 1.5, big ? 11 : 9, WHITE, GREY, key === 'aim9m' ? 0.4 : 0.5, 0.3, 0.6);
+    if (smoke > 0.1 || Math.random() < smoke * 8) this.smoke.emit(p.x + R(), p.y + R(), p.z + R(), R() * 2, R() * 2, R() * 2, 3.5 + Math.random(), 1.5, big ? 11 : 9, WHITE, GREY, Math.max(0.08, smoke * 0.85), 0.3, 0.6);
   }
 
   // Chaff bloom: a quick glittering grey cloud.
@@ -183,6 +183,60 @@ export class Effects {
         this.fire.emit(p.x, p.y, p.z, v.x * 0.5 + R() * 160, v.y * 0.5 + R() * 160 + 30, v.z * 0.5 + R() * 160, 1.5 + Math.random(), 2.5, 1, FIRE0, FIRE1, 1, 0.6, -9.8);
       }
     }
+  }
+
+  // Fuel-air fireball of a jet blowing apart: smeared along the flight path, rising as it burns.
+  fireball(p, v, s = 1) {
+    const n = Math.round(150 * s);
+    for (let i = 0; i < n; i++) {
+      const k = Math.random();
+      this.fire.emit(p.x + R() * 8 * s, p.y + R() * 8 * s, p.z + R() * 8 * s,
+        v.x * (0.25 + k * 0.6) + R() * 70 * s, v.y * (0.25 + k * 0.6) + R() * 70 * s, v.z * (0.25 + k * 0.6) + R() * 70 * s,
+        0.7 + Math.random() * 1.3, 9 * s, 30 * s, FIRE0, FIRE1, 1, 2.2, 5);
+    }
+    for (let i = 0; i < n * 0.8; i++) {
+      this.smoke.emit(p.x + R() * 14 * s, p.y + R() * 14 * s, p.z + R() * 14 * s,
+        v.x * 0.35 + R() * 40 * s, v.y * 0.35 + R() * 40 * s, v.z * 0.35 + R() * 40 * s,
+        5 + Math.random() * 6, 12 * s, 55 * s, DARK, DARK2, 0.7, 1.1, 1.8);
+    }
+    for (let i = 0; i < 40 * s; i++) { // white-hot sparks and burning bits
+      this.fire.emit(p.x, p.y, p.z, v.x * 0.6 + R() * 220, v.y * 0.6 + R() * 220 + 20, v.z * 0.6 + R() * 220,
+        1.2 + Math.random() * 1.5, 1.6, 0.6, FLARE0, FIRE1, 1, 0.8, -9.8);
+    }
+  }
+  // Flames and smoke streaming off burning wreckage (called every frame per piece).
+  wreckFire(p, v, big, k = 1) {
+    const s = big ? 1 : 0.5;
+    this.fire.emit(p.x + R() * 2 * s, p.y + R() * 2 * s, p.z + R() * 2 * s, v.x * 0.2 + R() * 6, v.y * 0.2 + R() * 6 + 3, v.z * 0.2 + R() * 6,
+      0.25 + Math.random() * 0.35, (big ? 5.5 : 2.6) * k, 1.5, FIRE0, FIRE1, 0.95, 1.5, 4);
+  }
+  wreckSmoke(p, v, big, dark = 1) {
+    const s = big ? 1 : 0.45;
+    this.smoke.emit(p.x + R() * 2, p.y + R() * 2, p.z + R() * 2, v.x * 0.08 + R() * 3, v.y * 0.08 + R() * 3, v.z * 0.08 + R() * 3,
+      4 + Math.random() * 4, 3 * s, 24 * s, dark > 0.5 ? DARK : DARK2, GREY, 0.55 * Math.max(0.4, dark), 0.7, 1.4);
+  }
+  // A column of black smoke rising from a crash site, drifting with the wind.
+  smokeColumn(p, age, life) {
+    const k = 1 - age / life;
+    this.smoke.emit(p.x + R() * 10, p.y + 2 + Math.random() * 4, p.z + R() * 10, 3 + R() * 3, 9 + Math.random() * 6, 1.5 + R() * 3,
+      9 + Math.random() * 5, 8, 60, DARK, GREY, 0.55 * k + 0.1, 0.25, 0.9);
+    if (age < life * 0.45 && Math.random() < 0.8) this.fire.emit(p.x + R() * 8, p.y + 1, p.z + R() * 8, R() * 4, 6 + Math.random() * 6, R() * 4, 0.5 + Math.random() * 0.4, 7, 3, FIRE0, FIRE1, 0.9, 1, 2);
+  }
+  // Water spout where wreckage hits the sea.
+  splash(p, s = 1) {
+    for (let i = 0; i < 70 * s; i++) {
+      const up = 25 + Math.random() * 45 * s;
+      this.smoke.emit(p.x + R() * 6 * s, p.y + 0.5, p.z + R() * 6 * s, R() * 22 * s, up, R() * 22 * s, 2.2 + Math.random() * 1.6, 3 * s, 14 * s, WHITE, [0.82, 0.86, 0.9], 0.75, 0.6, -9.8);
+    }
+  }
+  // Dust and dirt thrown up where debris hits the ground.
+  dust(p, s = 1) {
+    const D0 = [0.45, 0.4, 0.33], D1 = [0.6, 0.56, 0.5];
+    for (let i = 0; i < 26 * s; i++) this.smoke.emit(p.x + R() * 4 * s, p.y + 0.5, p.z + R() * 4 * s, R() * 18 * s, 6 + Math.random() * 14 * s, R() * 18 * s, 2.5 + Math.random() * 2, 3 * s, 16 * s, D0, D1, 0.6, 1.2, -2);
+  }
+  seatRocket(p, v, down) {
+    this.fire.emit(p.x, p.y, p.z, v.x + down.x * 60 + R() * 10, v.y + down.y * 60 + R() * 10, v.z + down.z * 60 + R() * 10, 0.12, 2.4, 1, FLARE0, FIRE1, 1, 2);
+    this.smoke.emit(p.x, p.y, p.z, v.x * 0.3 + down.x * 20, v.y * 0.3 + down.y * 20, v.z * 0.3 + down.z * 20, 2.5, 1.5, 7, WHITE, GREY, 0.45, 1.2, 0.5);
   }
 
   update(dt) {

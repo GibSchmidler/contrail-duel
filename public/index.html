@@ -15,7 +15,16 @@
   <div id="menu" class="screen">
     <div class="panel wide">
       <h1>CONTRAIL <span>DUEL</span></h1>
-      <p class="tag">1v1 jet dogfights · keyboard only · guns, heat-seekers &amp; flares</p>
+      <p class="tag">1v1 modern air combat · 4 nations · 13 fighters · keyboard only</p>
+
+      <section id="hangar">
+        <h2>Aircraft</h2>
+        <div id="countryTabs" class="tabs"></div>
+        <p id="countryBlurb" class="dim small"></p>
+        <div id="jetCards" class="cards"></div>
+        <div id="jetInfo" class="jetinfo"></div>
+        <label>Loadout <select id="loadout"></select></label>
+      </section>
 
       <div class="grid">
         <section>
@@ -23,14 +32,6 @@
           <label>Callsign <input id="callsign" maxlength="16" autocomplete="off"></label>
           <label>First to
             <select id="rounds"><option value="1">1 kill</option><option value="3">3 kills</option><option value="5">5 kills</option><option value="7">7 kills</option></select>
-          </label>
-          <label>Loadout
-            <select id="loadout">
-              <option value="balanced">Balanced — 2× AIM-120C, 2× AIM-9X</option>
-              <option value="bvr">Long range — 4× AIM-120C, 2× AIM-9X (heavier)</option>
-              <option value="knife">Knife fight — 4× AIM-9X (lightest)</option>
-              <option value="classic">Old school — 6× AIM-9M</option>
-            </select>
           </label>
           <label>Start
             <select id="engage">
@@ -53,6 +54,7 @@
               <option value="ace">Ace</option>
             </select>
           </label>
+          <label>Enemy aircraft <select id="aiJet"></select></label>
           <button id="btnPractice" class="primary">Fly vs AI</button>
 
           <h2 class="mt">Online 1v1</h2>
@@ -111,29 +113,34 @@
           <tr><td><kbd>R</kbd>/<kbd>F</kbd></td><td>Throttle up / down (above 100% = afterburner)</td></tr>
           <tr><td><kbd>B</kbd> (hold)</td><td>Airbrake</td></tr>
           <tr><td><kbd>Space</kbd></td><td>Cannon</td></tr>
-          <tr><td><kbd>1</kbd> · <kbd>2</kbd></td><td>Select Sidewinder (IR) · AMRAAM (radar)</td></tr>
+          <tr><td><kbd>1</kbd> · <kbd>2</kbd></td><td>Select IR missile · radar missile</td></tr>
           <tr><td><kbd>Tab</kbd> or <kbd>L</kbd></td><td>Radar lock on / off (single-target track)</td></tr>
           <tr><td><kbd>X</kbd></td><td>Fire selected missile</td></tr>
           <tr><td><kbd>C</kbd> · <kbd>Z</kbd></td><td>Flares (vs IR) · Chaff (vs radar)</td></tr>
-          <tr><td><kbd>T</kbd></td><td>Padlock / helmet cue (keeps the bandit in view)</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Padlock view (with a helmet sight, cues the IR seeker)</td></tr>
           <tr><td><kbd>G</kbd> (hold)</td><td>Look back</td></tr>
           <tr><td><kbd>V</kbd></td><td>Chase / cockpit view</td></tr>
           <tr><td><kbd>Esc</kbd> · <kbd>H</kbd></td><td>Pause · this help</td></tr>
         </table>
         <div class="tips">
+          <h3>Nations and jets</h3>
+          <p>Each jet uses its real thrust, weight, wing, radar, sensors, gun and missiles. Nothing is balanced, so some jets are simply better. <b>USA</b> has the best radars and missiles, plus the F-22. <b>Russia</b> has big thrust-vectoring Flankers with IRST. <b>China</b> has AESA radars, the long-range PL-15 and the gunless J-20. <b>Europe</b> has agile deltas with the best jamming, missile warning and the ramjet Meteor.</p>
           <h3>Flying</h3>
-          <p>The jet is fly-by-wire: holding pull commands up to 10 G, limited by angle of attack. Hard turns bleed speed fast. You turn tightest and fastest at <b>corner speed</b>, about 320 kts at the start altitude and lower nearer the ground. The <b>blue caret</b> on the speed tape marks it. Faster than that you're G-limited and the circle gets wide, so use the airbrake (<kbd>B</kbd>) to slow down before a hard turn. Trade altitude for speed by diving, and use the afterburner to recover energy.</p>
-          <p>Pulling above 7.5 G fills the <b>G-STRESS</b> bar (about 8 s at full pull), and when it's full you black out briefly. Ease off to recover.</p>
+          <p>Fly-by-wire: holding pull commands up to the jet's G limit, limited by angle of attack. Hard turns bleed speed. You turn tightest at <b>corner speed</b>, marked by the <b>blue caret</b> on the speed tape. Above it, use the airbrake (<kbd>B</kbd>) before a hard turn. Thrust-vectoring jets (F-22, Su-35, Su-57) keep nose authority at very low speed. Pulling above 7.5 G fills <b>G-STRESS</b>, and when it's full you black out.</p>
           <h3>Guns</h3>
-          <p>M61 cannon: 511 rounds at 100 per second, so you have about 5 seconds of fire. The barrels take a moment to spin up. Rounds slow down with drag and spread a little, so the gun is only effective inside about 1,000 m. Put the gun cross on the <b>lead pipper</b> (the circle with a dot). Hold <kbd>Shift</kbd> for fine corrections.</p>
-          <h3>Sensors</h3>
-          <p>You only know what your sensors tell you. Your <b>radar</b> (the fan at the bottom) sees ±60° off the nose out to about 40 km. Beyond 8 km you need it to find the bandit, and a radar track draws the box on the HUD. <kbd>Tab</kbd> locks it (STT). A lock gives your AMRAAM datalink updates, but the bandit's <b>RWR</b> warns them that you're locked on.</p>
-          <p>Radars filter out ground clutter, so a jet that is below you and flying across your line of sight (<b>beaming</b>, about 90° to you) disappears into the <b>notch</b>. Use it to break locks and defeat radar missiles. The <b>RWR</b> circle shows radars painting you (F) and active missiles (M). The missile warning only detects a burning rocket motor within about 5 km, so a Sidewinder that has burned out is silent.</p>
+          <p>Each jet has its own cannon. The M61 fires 100 rounds/s; the Russian GSh-30-1 carries only 150 heavy rounds; the Typhoon's BK-27 and the Rafale's 30M791 sit in between. The <b>J-20 has no gun at all</b>. Put the gun cross on the <b>lead pipper</b>; it's only effective inside about 1,000 m.</p>
+          <h3>Sensors and stealth</h3>
+          <p><b>Radar</b> (the fan at the bottom) range depends on the radar and on the target's <b>radar cross-section</b>. Stealth jets are seen at a small fraction of normal range: an F-22 at about a tenth, a J-20 a little more, and the Su-57 about three-quarters. <b>Jamming</b> shortens enemy radar range further. <kbd>Tab</kbd> locks (STT), which gives radar missiles datalink updates but sets off the bandit's <b>RWR</b>. LPI radars (F-22, F-35-class AESAs) are hard for RWRs to hear.</p>
+          <p><b>IRST</b> (Russian, Chinese and European jets, plus the Super Hornet) passively sees engine heat. It shows an amber circle with a bearing but no range, and it can cue IR missiles without warning the target. <b>Terrain masks everything</b>: a ridge between you blocks radar, IRST, missile seekers and your eyes. Hide behind mountains.</p>
+          <p>Radars filter out ground clutter, so a jet below you that is <b>beaming</b> (flying across your line of sight) drops into the <b>notch</b>. <b>Missile warning</b> (MAWS) sees a burning motor within about 5 km and is fitted to the European, Chinese, Su-57 and F-22 jets. Without it, a silent missile only shows once its seeker goes active.</p>
           <h3>Missiles</h3>
-          <p><b>AIM-9 Sidewinder (Fox 2)</b> is infrared. Press <kbd>1</kbd> and keep the bandit in the seeker circle until the tone goes steady. Lock range is longest from behind and when the bandit is in afterburner. The <b>9X</b> can lock far off the nose with the helmet (padlock view <kbd>T</kbd>) or a radar lock, turns harder, and ignores most flares. The <b>9M</b> needs the bandit near the nose and is easier to decoy.</p>
-          <p><b>AIM-120 AMRAAM (Fox 3)</b> is active radar. Press <kbd>2</kbd>; it needs a radar track. With a lock it receives datalink updates; without one it flies to where the bandit was. About 9 km from the target its own radar goes active ("pitbull") and it's on its own. The scale right of the altitude shows its launch zone: <b>IN RNG</b> means it can reach a target holding course, and <b>SHOOT</b> means no escape even if they turn and run.</p>
+          <p><b>Fox 2 (IR):</b> AIM-9, R-73/74, PL-10, IRIS-T, MICA IR. Press <kbd>1</kbd> and hold the bandit in the seeker circle until the tone goes steady. Modern ones can lock far off the nose using a helmet sight (<kbd>T</kbd>), a radar lock or the IRST.</p>
+          <p><b>Fox 3 (active radar):</b> AIM-120, R-77, PL-12/15, MICA EM, Meteor. Press <kbd>2</kbd>; it needs a radar track. It's datalinked while you hold a lock, then goes active ("pitbull") near the target. The <b>Meteor</b> is ramjet-powered, so it keeps thrusting the whole way and is very hard to outrun. <b>Fox 1 (R-27ER):</b> semi-active, so you must keep your radar lock until impact (the HUD shows ILL), or it goes dumb.</p>
+          <p>The scale right of the altitude is the launch zone: <b>IN RNG</b> means it can hit a target holding course; <b>SHOOT</b> means no escape.</p>
           <h3>Defending</h3>
-          <p><b>Against IR:</b> turn the missile onto your wing, pop flares (<kbd>C</kbd>) and come out of afterburner. <b>Against radar:</b> beam it and get below it so you sit in the notch, then drop chaff (<kbd>Z</kbd>). Chaff works best when you're beaming. Every missile runs out of energy, so turning hard or running away makes it fall short.</p>
+          <p><b>Against IR:</b> put the missile on your wing, pop flares (<kbd>C</kbd>), get out of afterburner. <b>Against radar:</b> beam it, go low into the notch, drop chaff (<kbd>Z</kbd>), or put a mountain between you. Missiles run out of energy, except the Meteor, which runs out much later.</p>
+          <h3>Getting shot down</h3>
+          <p>A missile hit usually tears the jet apart; gunfire tends to leave it burning and spinning in. Most of the time the pilot ejects. Watch for the chute.</p>
         </div>
       </div>
       <button id="btnHelpClose" class="primary">Close (H)</button>

@@ -1,12 +1,11 @@
 // Gun, missiles (IR and active radar), flares, chaff and hit detection.
 import * as THREE from 'three';
-import { MUZZLE_VEL, GRAV, airDensity, bulletDragK } from './flight.js';
+import { GRAV, airDensity, bulletDragK } from './flight.js';
 import { buildMissileMesh } from './models.js';
-import { groundHeight } from './world.js';
-import { WEAPONS, WEAPON_BY_CODE, GUN, RADAR } from './arsenal.js';
-import { inNotch, notchFactor } from './sensors.js';
+import { groundHeight, lineOfSight } from './world.js';
+import { WEAPONS, WEAPON_BY_CODE, GUNS, ramjetFactor } from './arsenal.js';
+import { inNotch, notchFactor, detectRange } from './sensors.js';
 
-export const GUN_RATE = GUN.rate;
 const MAX_BULLETS = 1400;
 
 // Hitbox capsules in body coordinates (forward = -Z)
@@ -53,10 +52,11 @@ function pointSegDist(a, b, out) {
 
 const _iq = new THREE.Quaternion(), _l0 = new THREE.Vector3(), _l1 = new THREE.Vector3();
 // Segment from (bullet0 - target0) to (bullet1 - target1), tested in target body frame.
-function hitsAircraft(rel0, rel1, quat) {
+// `size` scales the capsules: a Flanker is a much bigger target than a Gripen.
+function hitsAircraft(rel0, rel1, quat, size = 1) {
   _iq.copy(quat).invert();
-  _l0.copy(rel0).applyQuaternion(_iq);
-  _l1.copy(rel1).applyQuaternion(_iq);
+  _l0.copy(rel0).applyQuaternion(_iq).divideScalar(size);
+  _l1.copy(rel1).applyQuaternion(_iq).divideScalar(size);
   // coarse reject
   if (Math.min(_l0.lengthSq(), _l1.lengthSq()) > 400 && segSegDist2(_l0, _l1, HITBOX[0].a, HITBOX[0].b) > 64) return false;
   for (const h of HITBOX) {
@@ -119,29 +119,37 @@ export class Combat {
   // live = this client performs hit detection for this bullet
   fireBullet(plane, live, frac = 0) {
     if (this.bullets.length >= MAX_BULLETS) this.bullets.shift();
+    const gun = plane.gunT || GUNS.m61;
     const dir = _tmp.copy(plane.fwd)
-      .addScaledVector(plane.right, gauss() * GUN.sigma)
-      .addScaledVector(plane.up, gauss() * GUN.sigma).normalize();
-    const p = plane.pos.clone().addScaledVector(plane.fwd, 7).addScaledVector(plane.right, -0.7).addScaledVector(plane.up, 0.35);
-    const v = plane.vel.clone().addScaledVector(dir, MUZZLE_VEL);
+      .addScaledVector(plane.right, gauss() * gun.sigma)
+      .addScaledVector(plane.up, gauss() * gun.sigma).normalize();
+    const gp = this.gunMuzzle(plane);
+    const p = gp.clone();
+    const v = plane.vel.clone().addScaledVector(dir, gun.muzzle);
     p.addScaledVector(v, frac);
-    this.bullets.push({ p, v, prev: p.clone(), t: 0, owner: plane, live, tracer: Math.random() < 0.5 });
+    // heavier 30 mm rounds get a tracer every round or two; the M61 every other round
+    this.bullets.push({ p, v, prev: p.clone(), t: 0, owner: plane, live, gun, tracer: Math.random() < (gun.rate > 60 ? 0.5 : 0.8), big: gun.damage > 10 });
+  }
+  gunMuzzle(plane, out = new THREE.Vector3()) {
+    const g = (plane.T && plane.T.gunPos) || [-0.7, 0.35, -7];
+    return out.copy(plane.pos).addScaledVector(plane.right, g[0]).addScaledVector(plane.up, g[1]).addScaledVector(plane.fwd, -g[2] + 0.5);
   }
 
   launchMissile(plane, target, key, station = 0) {
     const w = WEAPONS[key];
-    const mount = [[5.35, 0.0, 2.6], [-5.35, 0.0, 2.6], [3.4, -0.55, 1.7], [-3.4, -0.55, 1.7], [2.2, -0.75, 0.6], [-2.2, -0.75, 0.6]][station] || [0, -1.2, 0];
+    const mount = (plane.T && plane.T.stations[station]) || [0, -1.2, 0, 'body'];
+    const drop = mount[3] === 'bay' ? -14 : w.cls === 'mrm' ? -9 : -3;   // bay launchers kick the missile clear first
     const m = {
       id: (plane.netId || 'L') + '-' + this.missileSeq++, key, w,
       owner: plane, target, decoy: null, seen: new Set(),
       pos: plane.pos.clone().addScaledVector(plane.right, mount[0]).addScaledVector(plane.up, mount[1] - 0.4).addScaledVector(plane.fwd, -mount[2]),
-      vel: plane.vel.clone().addScaledVector(plane.fwd, 12).addScaledVector(plane.up, w.cls === 'mrm' ? -9 : -3),
+      vel: plane.vel.clone().addScaledVector(plane.fwd, mount[3] === 'bay' ? 4 : 12).addScaledVector(plane.up, drop),
       prev: new THREE.Vector3(), t: 0, lost: false, lostT: 0, mesh: this.getMesh(key), burning: true,
       phase: 'ir', est: new THREE.Vector3(), estVel: new THREE.Vector3(), mem: 0, minDist: 1e9,
     };
-    if (w.guidance === 'radar') {
+    if (w.guidance === 'radar' || w.guidance === 'sarh') {
       const R = plane.radar;
-      m.phase = R && R.stt ? 'dl' : 'inertial';
+      m.phase = w.guidance === 'sarh' ? 'sarh' : R && R.stt ? 'dl' : 'inertial';
       if (R && R.contact) { m.est.copy(R.pos); m.estVel.copy(R.vel); }
       else { m.est.copy(plane.pos).addScaledVector(plane.fwd, 15000); m.estVel.set(0, 0, 0); } // "maddog": seeker searches straight ahead
     }
@@ -197,7 +205,7 @@ export class Combat {
   }
 
   static flags(m) {
-    return (m.burning ? 1 : 0) | (m.phase === 'active' && !m.decoy && !m.lost ? 2 : 0) | (m.phase === 'dl' ? 4 : 0);
+    return (m.burning ? 1 : 0) | (m.phase === 'active' && !m.decoy && !m.lost ? 2 : 0) | (m.phase === 'dl' || m.phase === 'sarh' ? 4 : 0);
   }
 
   update(dt, planes, now, oneWayMs = 0) {
@@ -207,7 +215,7 @@ export class Combat {
       const b = this.bullets[i];
       b.prev.copy(b.p);
       const sp = b.v.length();
-      b.v.multiplyScalar(1 / (1 + bulletDragK(b.p.y) * sp * dt));
+      b.v.multiplyScalar(1 / (1 + bulletDragK(b.p.y, b.gun) * sp * dt));
       b.v.y -= GRAV * dt;
       b.p.addScaledVector(b.v, dt);
       b.t += dt;
@@ -222,10 +230,11 @@ export class Combat {
           const r0 = _tmp.copy(b.prev).sub(pl.prevPos);
           if (r0.lengthSq() > 250000) continue; // > 500 m away
           const r1 = _tmp2.copy(b.p).sub(pl.pos);
-          if (hitsAircraft(r0, r1, pl.quat)) {
+          if (hitsAircraft(r0, r1, pl.quat, pl.T ? pl.T.size : 1)) {
             dead = true;
             fx.spark(b.p, pl.vel);
-            this.hooks.onDamage(pl, GUN.damage, 'gun', b.owner, b.p);
+            if (b.big) fx.spark(b.p, pl.vel);
+            this.hooks.onDamage(pl, b.gun.damage, 'gun', b.owner, b.p);
             break;
           }
         }
@@ -272,7 +281,8 @@ export class Combat {
       m.pos.copy(m.snapPos).addScaledVector(m.vel, age);
       m.t += dt;
       this.placeMissileMesh(m);
-      if (m.burning) for (let s = 1; s <= 3; s++) fx.missileTrail(_tmp.copy(prev).lerp(m.pos, s / 3), m.vel, true, m.key);
+      const w = WEAPONS[m.key];
+      if (m.burning) for (let s = 1; s <= 3; s++) fx.missileTrail(_tmp.copy(prev).lerp(m.pos, s / 3), m.vel, true, m.key, w.ramjet && m.t > w.stages[0][1] ? 0.08 : w.smoke);
     }
 
     this.updateTracers();
@@ -288,10 +298,11 @@ export class Combat {
   seekerSees(m, tgt, w) {
     _tmp2.copy(tgt.pos).sub(m.pos);
     const d = _tmp2.length();
-    if (d > w.seeker) return false;
+    if (d > detectRange(w.seeker, tgt, w.ccm)) return false;   // a stealthy target shrinks the seeker's reach
     const sp = Math.max(m.vel.length(), 1);
     if (_tmp2.dot(m.vel) / (d * sp) < Math.cos(w.gimbal)) return false;
-    return !inNotch(m.pos, tgt);
+    if (inNotch(m.pos, tgt)) return false;
+    return lineOfSight(m.pos, tgt.pos);
   }
 
   // returns null while flying, or {exploded, pos}
@@ -302,9 +313,11 @@ export class Combat {
     const sp = Math.max(m.vel.length(), 1);
     const vhat = _tmp.copy(m.vel).divideScalar(sp);
     const rho = airDensity(m.pos.y);
-    let thrust = 0, tt = m.t;
-    for (const [acc, d] of w.stages) { if (tt < d) { thrust = acc; break; } tt -= d; }
+    let thrust = 0, tt = m.t, stage = 0;
+    for (const [acc, d] of w.stages) { if (tt < d) { thrust = acc; break; } tt -= d; stage++; }
     m.burning = thrust > 0;
+    m.stage = stage;
+    if (w.ramjet && stage > 0 && thrust > 0) thrust *= ramjetFactor(rho, sp);
     const tgt = m.target;
     let aimPos = null, aimVel = null, loft = 0;
 
@@ -332,10 +345,33 @@ export class Combat {
       if (aimPos) {
         _los.copy(aimPos).sub(m.pos);
         const d = _los.length();
-        if (_los.dot(vhat) / d < Math.cos(w.gimbal) || d > w.seeker) { m.lost = true; aimPos = null; }
+        if (_los.dot(vhat) / d < Math.cos(w.gimbal) || d > w.seeker * (tgt && tgt.T && !m.decoy ? tgt.T.irSig : 1)) { m.lost = true; aimPos = null; }
+        else if (!m.decoy && !lineOfSight(m.pos, aimPos)) {
+          // target ducked behind terrain: the seeker coasts briefly, then gives up
+          m.maskT = (m.maskT || 0) + dt;
+          if (m.maskT > 0.5) { m.lost = true; aimPos = null; }
+        } else m.maskT = 0;
       }
+    } else if (w.guidance === 'sarh') {
+      // ---- semi-active radar (R-27ER): homes on the launching jet's radar energy reflected off
+      // the target, so the shooter has to keep its lock (and keep pointing at the target) to impact ----
+      const o = m.owner;
+      const lit = o && o.alive && o.radar && o.radar.stt && tgt && tgt.alive && lineOfSight(m.pos, tgt.pos);
+      if (lit) {
+        m.phase = 'sarh'; m.mem = 1.0;
+        m.est.copy(tgt.pos); m.estVel.copy(tgt.vel);
+        aimPos = tgt.pos; aimVel = tgt.vel;
+      } else {
+        m.phase = 'none';
+        m.mem -= dt; m.est.addScaledVector(m.estVel, dt);
+        aimPos = m.est; aimVel = m.estVel;
+        if (m.mem < 0) m.lost = true;
+      }
+      const dEst = m.pos.distanceTo(m.est);
+      if (dEst > 12000 && m.t > 1.5) loft = clamp((dEst - 12000) / 14000, 0, 1) * 0.7;
+      if (m.lost) aimPos = null;
     } else {
-      // ---- active radar (AIM-120): datalink/inertial midcourse, then its own seeker ----
+      // ---- active radar (AIM-120 and similar): datalink/inertial midcourse, then its own seeker ----
       if (m.phase === 'active') {
         if (m.decoy) {
           if (m.decoy.t > 4) m.lost = true;
@@ -402,7 +438,7 @@ export class Combat {
     m.pos.addScaledVector(m.vel, dt);
 
     this.placeMissileMesh(m);
-    if (m.burning) for (let s = 1; s <= 3; s++) this.effects.missileTrail(_tmp2.copy(m.prev).lerp(m.pos, s / 3), m.vel, true, m.key);
+    if (m.burning) for (let s = 1; s <= 3; s++) this.effects.missileTrail(_tmp2.copy(m.prev).lerp(m.pos, s / 3), m.vel, true, m.key, w.ramjet && m.stage > 0 ? 0.08 : w.smoke);
 
     // ---- proximity fuze ----
     if (tgt && tgt.alive && m.t > w.armT) {

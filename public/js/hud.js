@@ -141,7 +141,8 @@ export class Hud {
       c.beginPath(); c.moveTo(lx, y); c.lineTo(lx + (k % 50 === 0 ? 14 : 7) * sc, y); c.stroke();
     }
     // corner-speed caret: slowest speed that still reaches max G = tightest, fastest turn
-    const cornerKts = Math.sqrt((2 * JET.gMax * P.mass * GRAV) / (airDensity(P.pos.y) * JET.S * liftCoef(JET.aStall))) * 1.944;
+    const F = P.F || JET;
+    const cornerKts = Math.sqrt((2 * F.gMax * P.mass * GRAV) / (airDensity(P.pos.y) * F.S * liftCoef(F.aStall, F))) * 1.944;
     const ccy = cy + Math.max(-114 * sc, Math.min(114 * sc, (kts - cornerKts) * pxPerKt)); // pinned to the tape edge when off-scale
     c.fillStyle = Math.abs(kts - cornerKts) < 25 ? '#7fe8ff' : 'rgba(127,232,255,0.6)';
     c.beginPath(); c.moveTo(lx + 24 * sc, ccy - 6 * sc); c.lineTo(lx + 15 * sc, ccy); c.lineTo(lx + 24 * sc, ccy + 6 * sc); c.fill();
@@ -260,19 +261,26 @@ export class Hud {
     if (!S.opp || !S.opp.alive || !S.plane.alive) return;
     const R = S.radar;
     const tracked = S.tracked, visual = S.visual;
-    if (!tracked && !visual) return;
-    const pos = tracked && !visual ? R.pos : S.opp.pos;
+    const irst = !tracked && !visual && S.irst && S.irst.contact; // passive: bearing only, no range
+    if (!tracked && !visual && !irst) return;
+    const pos = tracked && !visual ? R.pos : irst ? S.irst.pos : S.opp.pos;
     const pt = S.project(pos);
     const margin = 40 * sc;
     const on = !pt.behind && pt.x > margin && pt.x < w - margin && pt.y > margin && pt.y < h - margin;
     const dist = tracked && !visual ? R.pos.distanceTo(S.plane.pos) : S.oppDist;
-    const distTxt = dist > 2000 ? (dist / 1000).toFixed(1) + ' km' : Math.round(dist) + ' m';
+    const distTxt = irst ? 'IRST' : dist > 2000 ? (dist / 1000).toFixed(1) + ' km' : Math.round(dist) + ' m';
     const memory = tracked && R.mem < RADAR.memory - 0.05; // coasting on a lost track
     c.strokeStyle = RED; c.fillStyle = RED;
     c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
     if (on) {
       const s = Math.max(12 * sc, Math.min(60, 2400 / Math.max(dist, 1)));
-      if (tracked) {
+      if (irst) {
+        c.strokeStyle = AMBER; c.fillStyle = AMBER;
+        c.setLineDash([3 * sc, 3 * sc]);
+        c.beginPath(); c.arc(pt.x, pt.y, s, 0, Math.PI * 2); c.stroke();
+        c.setLineDash([]);
+        c.textAlign = 'center'; c.fillText('IRST', pt.x, pt.y + s + 12 * sc);
+      } else if (tracked) {
         c.setLineDash(memory ? [4 * sc, 4 * sc] : []);
         c.lineWidth = (R.stt ? 2.4 : 1.6) * sc;
         c.strokeRect(pt.x - s, pt.y - s, s * 2, s * 2);
@@ -330,22 +338,25 @@ export class Hud {
     const lh = 20 * sc;
     c.textAlign = 'right';
     c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`;
-    const srm = firstOf(P.stores, 'srm') || (P.loadout === 'classic' ? 'aim9m' : 'aim9x');
+    // remember which types this jet started with so the rows keep their names at zero
+    const L = P.T.loadouts[P.loadout].st;
+    const srm = firstOf(P.stores, 'srm') || firstOf(L, 'srm'), mrm = firstOf(P.stores, 'mrm') || firstOf(L, 'mrm');
     const nS = countOf(P.stores, 'srm'), nM = countOf(P.stores, 'mrm');
     const row = (txt, sel, ok) => {
       c.fillStyle = !ok ? RED : sel ? '#ffffff' : 'rgba(157,255,184,0.75)';
       c.fillText((sel ? '▸ ' : '') + txt, x, y); y += lh;
     };
-    row(`1 SRM ${WEAPONS[srm].name} ×${nS}`, P.weapon === 'srm', nS > 0);
-    row(`2 MRM AIM-120C ×${nM}`, P.weapon === 'mrm', nM > 0 || P.weapon !== 'mrm');
-    row(`GUN ${P.gunAmmo}`, false, P.gunAmmo > 0);
+    row(`1 SRM ${srm ? WEAPONS[srm].name : '—'} ×${nS}`, P.weapon === 'srm', nS > 0);
+    row(`2 MRM ${mrm ? WEAPONS[mrm].name : '—'} ×${nM}`, P.weapon === 'mrm', nM > 0 || P.weapon !== 'mrm');
+    row(P.T.gun === 'none' ? 'NO GUN' : `GUN ${P.gunT.name.split(' ')[0]} ${P.gunAmmo}`, false, P.gunAmmo > 0);
     row(`FLR ${P.flares}  CHF ${P.chaff}`, false, P.flares > 0 || P.chaff > 0);
     // radar status + my AMRAAMs in flight
     const R = S.radar;
     c.fillStyle = R.stt ? RED : R.contact ? GREEN : 'rgba(157,255,184,0.6)';
     const acq = P.wantStt && !R.stt;
-    c.fillText(`RDR ${R.stt ? 'STT LOCK' : acq ? (R.contact ? 'ACQ…' : 'LOCK – NO TGT') : R.contact ? 'SRCH TRK' : 'SRCH'}${R.notched ? ' NOTCH' : ''}`, x, y); y += lh;
-    if (S.myMrm.length) { c.fillStyle = CYAN; c.fillText('120: ' + S.myMrm.join(' · '), x, y); }
+    c.fillText(`RDR ${R.stt ? 'STT LOCK' : acq ? (R.contact ? 'ACQ…' : 'LOCK – NO TGT') : R.contact ? 'SRCH TRK' : 'SRCH'}${R.notched ? ' NOTCH' : R.masked && R.contact ? ' MASKED' : ''}`, x, y); y += lh;
+    if (S.myMrm.length) { c.fillStyle = CYAN; c.fillText('MSL: ' + S.myMrm.join(' · '), x, y); y += lh; }
+    if (P.irst && P.T.irst) { c.fillStyle = P.irst.contact ? AMBER : 'rgba(157,255,184,0.6)'; c.fillText(P.irst.contact ? 'IRST TRK' : 'IRST SRCH', x, y); }
 
     // own hull
     const bx = 24 * sc, by = h - 70 * sc, bw = 180 * sc;
@@ -369,7 +380,7 @@ export class Hud {
     const Rp = 78 * sc, cx = w / 2, cy = h - 18 * sc;
     const contactDist = Rd.contact ? Rd.pos.distanceTo(P.pos) : 0;
     const range = contactDist > 18000 || !Rd.contact ? 40000 : contactDist > 8000 ? 20000 : 10000;
-    const g = RADAR.gimbal;
+    const g = Math.min(1.4, (P.radarT || RADAR).gimbal);
     c.fillStyle = 'rgba(0,20,8,0.3)'; c.strokeStyle = 'rgba(157,255,184,0.45)';
     c.beginPath(); c.moveTo(cx, cy); c.arc(cx, cy, Rp, -Math.PI / 2 - g, -Math.PI / 2 + g); c.closePath(); c.fill(); c.stroke();
     c.beginPath(); c.arc(cx, cy, Rp / 2, -Math.PI / 2 - g, -Math.PI / 2 + g); c.stroke();
@@ -417,7 +428,7 @@ export class Hud {
     };
     if (T && T.emitter && T.search && S.opp) {
       const color = T.launch ? (blink ? RED : AMBER) : T.lock ? AMBER : GREEN;
-      sym(T.emitter, T.launch ? '◆F' : 'F', color, T.lock);
+      sym(T.emitter, (T.launch ? '◆' : '') + (T.code || 'F'), color, T.lock);
     }
     if (T) for (const t of T.list) if (t.kind === 'active') sym(t.pos, 'M', blink ? RED : '#ffffff', true);
   }

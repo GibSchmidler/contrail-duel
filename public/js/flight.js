@@ -5,12 +5,14 @@
 // induced drag, wave drag, thrust lapse with altitude and gravity are physical,
 // so energy management (speed <-> altitude <-> turn rate) matters.
 import * as THREE from 'three';
-import { LOADOUTS, GUN, storeMass, storeDrag, countOf } from './arsenal.js';
+import { GUNS, WEAPONS, RADARS, countOf } from './arsenal.js';
+import { JETS, jetOf, DEFAULT_JET } from './aircraft.js';
 import { newRadar } from './sensors.js';
 
 export const GRAV = 9.81;
 export const SOUND_SPEED = 340;
 
+// Defaults (F-16C). Each jet type overrides these with its own `flight` block.
 export const JET = {
   mass: 10500,        // kg
   S: 42,              // effective lifting area m^2 (wings + body lift)
@@ -35,11 +37,11 @@ export function airDensity(h) { return 1.225 * Math.exp(-Math.max(0, h) / 8500);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 function smooth(a, b, x) { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
 
-export function liftCoef(a) {
+export function liftCoef(a, F = JET) {
   const x = Math.abs(a);
-  if (x <= JET.aStall) return JET.clA * a;
-  const peak = JET.clA * JET.aStall;
-  return Math.sign(a) * Math.max(0.5, peak - (x - JET.aStall) * 2.5);
+  if (x <= F.aStall) return F.clA * a;
+  const peak = F.clA * F.aStall;
+  return Math.sign(a) * Math.max(0.5, peak - (x - F.aStall) * 2.5);
 }
 
 const _vh = new THREE.Vector3(), _ld = new THREE.Vector3(), _sd = new THREE.Vector3();
@@ -47,8 +49,9 @@ const _a = new THREE.Vector3(), _ap = new THREE.Vector3(), _w = new THREE.Vector
 const _t = new THREE.Vector3(), _dq = new THREE.Quaternion();
 
 export class Aircraft {
-  constructor(name = 'Pilot') {
+  constructor(name = 'Pilot', type = DEFAULT_JET) {
     this.name = name;
+    this.setType(type);
     this.pos = new THREE.Vector3();
     this.vel = new THREE.Vector3();
     this.acc = new THREE.Vector3();
@@ -66,15 +69,32 @@ export class Aircraft {
   get radarMode() { return this.alive ? (this.radar.stt ? 2 : 1) : 0; }
   get missiles() { let n = 0; for (const s of this.stores) if (s) n++; return n; }
 
+  // Jet type: flight model, sensors, gun and stations all come from aircraft.js.
+  setType(key) {
+    this.type = JETS[key] ? key : DEFAULT_JET;
+    this.T = jetOf(this.type);
+    this.F = this.T.flight;
+    this.gunT = GUNS[this.T.gun];
+    this.radarT = RADARS[this.T.radar];
+  }
   setLoadout(key) {
-    this.loadout = LOADOUTS[key] ? key : 'balanced';
-    this.stores = LOADOUTS[this.loadout].st.slice();
+    const L = this.T.loadouts;
+    this.loadout = L[key] ? key : this.T.loadoutKeys[0];
+    this.stores = L[this.loadout].st.slice();
     this.updateStores();
     this.weapon = countOf(this.stores, 'mrm') > 0 ? 'mrm' : 'srm';
   }
+  // Stores add mass; external ones add drag (internal bays add none).
   updateStores() {
-    this.mass = JET.mass + storeMass(this.stores);
-    this.storeCd = storeDrag(this.stores);
+    let m = 0, d = 0;
+    this.stores.forEach((s, i) => {
+      if (!s) return;
+      const bay = this.T.stations[i][3] === 'bay';
+      m += WEAPONS[s].mass + (bay ? 0 : 25);
+      if (!bay) d += WEAPONS[s].drag;
+    });
+    this.mass = this.F.mass + m;
+    this.storeCd = d;
   }
 
   reset(pos, quat, speed, loadout = this.loadout) {
@@ -91,7 +111,8 @@ export class Aircraft {
     this.gloc = 0; this.blackedOut = false;
     this.airbrake = false;
     this.setLoadout(loadout);
-    this.gunAmmo = GUN.ammo; this.flares = 30; this.chaff = 30;
+    this.gunAmmo = this.T.ammo; this.flares = this.T.flares; this.chaff = this.T.chaff;
+    this.irst = { contact: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), mem: 0 };
     this.gunSpin = 0; this.gunAcc = 0; this.firing = false;
     this.radar = newRadar(); this.lastSide = 1; this.offBore = 99;
     this.lockProgress = 0; this.locked = false; this.inCone = false;
@@ -114,7 +135,8 @@ export class Aircraft {
     const vhat = _vh.copy(this.vel).divideScalar(V);
     const rho = airDensity(this.pos.y);
     const qbar = 0.5 * rho * V * V;
-    const qS = qbar * JET.S;
+    const JF = this.F;
+    const qS = qbar * JF.S;
     const m = this.mass;
 
     const vF = this.vel.dot(F), vU = this.vel.dot(U), vR = this.vel.dot(R);
@@ -127,25 +149,26 @@ export class Aircraft {
     let pitchIn = inp.pitch;
     if (this.blackedOut) pitchIn = Math.min(pitchIn, 0.1);
     const n0 = Math.max(0, U.y);
-    const nCmd = pitchIn >= 0 ? n0 + pitchIn * (JET.gMax - n0) : n0 + pitchIn * (n0 - JET.gMin);
+    const nCmd = pitchIn >= 0 ? n0 + pitchIn * (JF.gMax - n0) : n0 + pitchIn * (n0 - JF.gMin);
     const clCmd = (nCmd * m * GRAV) / Math.max(qS, 1);
-    const alphaT = clamp(clCmd / JET.clA, -JET.aFbw * 0.6, JET.aFbw);
+    const alphaT = clamp(clCmd / JF.clA, -JF.aFbw * 0.6, JF.aFbw);
 
     // ---- Forces ----
-    const cl = liftCoef(this.alpha);
+    const cl = liftCoef(this.alpha, JF);
     const lift = qS * cl;
     const liftDir = _ld.crossVectors(R, vhat).normalize();
     const sideDir = _sd.crossVectors(vhat, U).normalize();
-    const side = -qS * JET.cyb * this.beta;
+    const side = -qS * JF.cyb * this.beta;
     this.airbrake = !!inp.airbrake;
-    const cd = JET.cd0 + JET.wave * smooth(0.85, 1.05, this.mach) + JET.k * cl * cl +
-      (this.airbrake ? JET.brakeCd : 0) + 0.6 * this.beta * this.beta + this.storeCd;
+    const cd = JF.cd0 + JF.wave * smooth(0.85, 1.05, this.mach) + JF.k * cl * cl +
+      (this.airbrake ? JF.brakeCd : 0) + 0.6 * this.beta * this.beta + this.storeCd +
+      2.0 * Math.max(0, Math.abs(this.alpha) - 0.4) ** 2; // post-stall: the wing becomes an airbrake
     const drag = qS * cd;
 
-    this.throttle = clamp(inp.throttle, 0, JET.maxThrottle);
+    this.throttle = clamp(inp.throttle, 0, JF.maxThrottle);
     this.eng += (this.throttle - this.eng) * Math.min(1, dt * 1.6); // spool lag
-    let thrust = this.eng <= 1 ? JET.thrMil * this.eng
-      : JET.thrMil + (JET.thrAB - JET.thrMil) * ((this.eng - 1) / (JET.maxThrottle - 1));
+    let thrust = this.eng <= 1 ? JF.thrMil * this.eng
+      : JF.thrMil + (JF.thrAB - JF.thrMil) * ((this.eng - 1) / (JF.maxThrottle - 1));
     thrust *= Math.pow(rho / 1.225, 0.7) * (1 + 0.15 * this.mach);
     if (this.hp < 40) thrust *= 0.85;
 
@@ -163,12 +186,13 @@ export class Aircraft {
     // ---- Rotation: follow flight path + track AoA/sideslip targets + roll ----
     const ap = _ap.copy(a).addScaledVector(vhat, -a.dot(vhat));
     const w = _w.crossVectors(vhat, ap).divideScalar(V);
-    const auth = clamp(qbar / 6000, 0.08, 1);
+    // thrust vectoring keeps pitch authority when there's too little airflow for the tail
+    const auth = Math.max(clamp(qbar / 6000, 0.08, 1), JF.tvc * 0.6 * clamp(this.eng, 0, 1));
     w.addScaledVector(R, 7 * auth * (alphaT - this.alpha));
-    const betaT = -inp.yaw * JET.betaMax;
+    const betaT = -inp.yaw * JF.betaMax;
     w.addScaledVector(U, 5 * auth * (betaT - this.beta));
-    const rollAuth = clamp(qbar / 14000, 0.12, 1) * (1 - 0.45 * clamp(this.alpha / JET.aFbw, 0, 1));
-    const pT = inp.roll * JET.rollMax * rollAuth;
+    const rollAuth = Math.max(clamp(qbar / 14000, 0.12, 1), JF.tvc * 0.35) * (1 - 0.45 * (1 - JF.tvc * 0.5) * clamp(this.alpha / JF.aFbw, 0, 1));
+    const pT = inp.roll * JF.rollMax * rollAuth;
     this.p += (pT - this.p) * Math.min(1, dt * 10);
     w.addScaledVector(V > 30 ? vhat : F, this.p);
     this.omega.copy(w);
@@ -200,21 +224,21 @@ export class Aircraft {
 // Gun ballistics shared by the gunsight, AI and bullets. Bullets keep their launch
 // direction and slow down with drag: |v| decays as v0 / (1 + k v0 t), so distance
 // along the path is v0 * g(t) with g(t) = ln(1 + k v0 t) / (k v0).
-export const MUZZLE_VEL = GUN.muzzle;
-export function bulletDragK(alt) { return GUN.dragK * airDensity(alt) / 1.225; }
+export const MUZZLE_VEL = GUNS.m61.muzzle;
+export function bulletDragK(alt, gun = GUNS.m61) { return gun.dragK * airDensity(alt) / 1.225; }
 const _D = new THREE.Vector3(), _vb = new THREE.Vector3();
 // Returns the unit aim direction needed to hit a target with drag and gravity.
-export function computeLeadDir(shooterPos, shooterVel, tPos, tVel, out) {
-  const k = bulletDragK(shooterPos.y);
-  let t = tPos.distanceTo(shooterPos) / (MUZZLE_VEL + shooterVel.length());
+export function computeLeadDir(shooterPos, shooterVel, tPos, tVel, out, gun = GUNS.m61) {
+  const k = bulletDragK(shooterPos.y, gun), MV = gun.muzzle;
+  let t = tPos.distanceTo(shooterPos) / (MV + shooterVel.length());
   out.copy(tPos).sub(shooterPos).normalize();
   for (let i = 0; i < 6; i++) {
-    const v0 = _vb.copy(shooterVel).addScaledVector(out, MUZZLE_VEL).length();
+    const v0 = _vb.copy(shooterVel).addScaledVector(out, MV).length();
     const g = Math.log(1 + k * v0 * t) / (k * v0);
     // muzzle * D * g = rel + tVel * t - shooterVel * g + 0.5 * G * t^2 (up)
     _D.copy(tPos).sub(shooterPos).addScaledVector(tVel, t).addScaledVector(shooterVel, -g);
     _D.y += 0.5 * GRAV * t * t;
-    const gNeed = _D.length() / MUZZLE_VEL;
+    const gNeed = _D.length() / MV;
     out.copy(_D).normalize();
     const kv = k * v0 * gNeed;
     t = kv < 0.95 ? (Math.exp(k * v0 * gNeed) - 1) / (k * v0) : 6; // beyond ~5 s the round is spent
