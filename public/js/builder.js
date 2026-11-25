@@ -2,11 +2,44 @@
 // and forms for the rules, both sides and every aircraft slot.
 import { MAPS, TIMES, WEATHER, ARENA_RADIUS, previewHeights } from './world.js';
 import { JETS, JETS_OF, COUNTRIES } from './aircraft.js';
-import { PRESETS, MAX_PER_SIDE, SKILL_LABELS, FORMATIONS, SIDE_COLORS, sanitize, summary, sideHeading, spawnPoints, countSeats, slot, blankScenario } from './scenario.js';
+import { PRESETS, MAX_PER_SIDE, SKILL_LABELS, FORMATIONS, SIDE_COLORS, sanitize, summary, sideHeading, spawnPoints, countSeats, slot, blankScenario,
+  AI_STATS, ABILITY_KEYS, TEMPER_KEYS, SKILL_BASE, PERSONALITIES, STYLES, ORDERS, WEAPON_RULES, PRIORITIES, aiConfig, aiLabel } from './scenario.js';
 
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(label)}</option>`;
 const VIEW = 34000; // half-width of the map view (m)
+function statWord(st, v) { return v < 20 ? st.lo : v > 80 ? st.hi : v < 40 ? 'below average' : v > 60 ? 'above average' : 'average'; }
+function aiEditor(q, k, i) {
+  const c = aiConfig(q), d = `data-side="${k}" data-slot="${i}"`;
+  const slider = (key) => {
+    const st = AI_STATS[key];
+    return `<label class="aistat" title="${esc(st.help)}"><span class="an">${st.name}</span>
+      <input type="range" min="0" max="100" step="1" value="${Math.round(c.st[key])}" ${d} data-ai="st.${key}">
+      <span class="av" data-val="${k}:${i}:${key}">${Math.round(c.st[key])} · ${esc(statWord(st, c.st[key]))}</span></label>`;
+  };
+  const needsCommit = c.ord === 'cap' || c.ord === 'escort' || c.ord === 'ambush';
+  return `<div class="aiedit">
+    <div class="aigrid">
+      <label>Personality <select ${d} data-ai="per">${Object.entries(PERSONALITIES).map(([x, v]) => opt(x, v.name, c.per)).join('')}</select>
+        <span class="dim small">${esc(PERSONALITIES[c.per].desc)}</span></label>
+      <label>Orders <select ${d} data-ai="ord">${Object.entries(ORDERS).map(([x, v]) => opt(x, v.name, c.ord)).join('')}</select>
+        <span class="dim small">${esc(ORDERS[c.ord].desc)}</span></label>
+      <label>Preferred range <select ${d} data-ai="style">${Object.entries(STYLES).map(([x, v]) => opt(x, v, c.style)).join('')}</select></label>
+      <label>Weapons <select ${d} data-ai="wpn">${Object.entries(WEAPON_RULES).map(([x, v]) => opt(x, v, c.wpn)).join('')}</select></label>
+      <label>Target priority <select ${d} data-ai="pri">${Object.entries(PRIORITIES).map(([x, v]) => opt(x, v, c.pri)).join('')}</select></label>
+      ${needsCommit ? `<label>Commit range (km) <input type="number" min="3" max="80" value="${Math.round(c.commit)}" ${d} data-ai="commit"></label>` : ''}
+    </div>
+    <div class="aistats">
+      <div><h4>Abilities <span class="dim">(start from experience: ${esc(SKILL_LABELS[q.skill])})</span></h4>${ABILITY_KEYS.map(slider).join('')}</div>
+      <div><h4>Temperament <span class="dim">(start from personality)</span></h4>${TEMPER_KEYS.map(slider).join('')}</div>
+    </div>
+    <div class="brow">
+      <button class="mini" data-act="aiReset" ${d}>Reset sliders</button>
+      <button class="mini" data-act="aiCopy" ${d}>Copy these AI settings to every AI on this side</button>
+      <button class="mini ghost" data-act="aiClose" ${d}>Done</button>
+    </div>
+  </div>`;
+}
 const LOADOUT_NAMES = { '': 'Default', dogfight: 'Dogfight (if the jet has it)', bvr: 'Long range (if the jet has it)' };
 
 const mapCache = {};
@@ -137,6 +170,7 @@ export class Builder {
   note(t) { this.$('bShareMsg').textContent = t; }
 
   load(s) {
+    this.openAi = null;
     this.s = sanitize(s);
     this.builtIn = PRESETS.some((p) => p.id === this.s.id);
     this.renderForm();
@@ -208,7 +242,7 @@ export class Builder {
           <label>Spacing (m) <input type="number" data-side="${k}" data-f="spacing" min="300" max="5000" step="100" value="${Math.round(sd.spacing)}"></label>
           <label>Heading (°) <span class="hdg"><input type="number" data-side="${k}" data-f="hdg" min="0" max="359" value="${Math.round(((sideHeading(s, k) % 360) + 360) % 360)}" ${auto ? 'disabled' : ''}><label class="chk"><input type="checkbox" data-side="${k}" data-f="auto" ${auto ? 'checked' : ''}> auto</label></span></label>
         </div>
-        <table class="slots"><tr><th>#</th><th>Pilot</th><th>Aircraft</th><th>Loadout</th><th>AI skill</th><th></th></tr>`;
+        <table class="slots"><tr><th>#</th><th>Pilot</th><th>Aircraft</th><th>Loadout</th><th>Experience</th><th>AI behaviour</th><th></th></tr>`;
       sd.slots.forEach((q, i) => {
         const human = q.pilot === 'human';
         h += `<tr>
@@ -217,8 +251,10 @@ export class Builder {
           <td><select data-side="${k}" data-slot="${i}" data-q="jet">${jetOptions(q.jet, human, i)}</select></td>
           <td><select data-side="${k}" data-slot="${i}" data-q="loadout">${human && q.jet === 'choice' ? opt('', "Pilot's choice", '') : loadoutOptions(q.jet, q.loadout)}</select></td>
           <td><select data-side="${k}" data-slot="${i}" data-q="skill" title="${human ? 'Used if no human takes this seat' : ''}">${Object.entries(SKILL_LABELS).map(([sk, n]) => opt(sk, n, q.skill)).join('')}</select></td>
+          <td><button class="mini aibtn${this.openAi === k + ':' + i ? ' on' : ''}" data-act="aiOpen" data-side="${k}" data-slot="${i}" title="${human ? 'How the AI flies this seat if no human takes it' : 'Edit how this AI fights'}">⚙ ${esc(aiLabel(q))}</button></td>
           <td>${sd.slots.length > 1 ? `<button class="mini ghost" data-act="del" data-side="${k}" data-slot="${i}" title="Remove">✕</button>` : ''}</td>
         </tr>`;
+        if (this.openAi === k + ':' + i) h += `<tr><td></td><td colspan="6">${aiEditor(q, k, i)}</td></tr>`;
       });
       h += `</table>
         <div class="brow">
@@ -228,7 +264,7 @@ export class Builder {
         </div>
       </section>`;
     });
-    h += `<p class="dim small">Human seats are for players in an online room; in practice you take the first human seat and the AI flies any other. Empty human seats are flown by the AI using the skill shown.</p>`;
+    h += `<p class="dim small">Human seats are for players in an online room; in practice you take the first human seat and the AI flies any other. Empty human seats are flown by the AI using the experience and behaviour shown. Press ⚙ to give any AI its own personality, orders and stats.</p>`;
     this.form.innerHTML = h;
   }
 
@@ -249,9 +285,28 @@ export class Builder {
       else if (f === 'hdg') { if (t.value !== '') sd.hdg = +val; }
       else if (f === 'spd') { if (t.value !== '') sd.spd = +val / 3.6; }
       else if (t.value !== '') sd[f] = +val;
+    } else if (t.dataset.ai) {
+      const q = s.sides[+t.dataset.side].slots[+t.dataset.slot], f = t.dataset.ai;
+      const a = q.ai || (q.ai = aiConfig(q));
+      if (f.startsWith('st.')) {
+        const key = f.slice(3);
+        a.st[key] = +val;
+        const lab = this.form.querySelector(`[data-val="${t.dataset.side}:${t.dataset.slot}:${key}"]`);
+        if (lab) lab.textContent = `${val} · ${statWord(AI_STATS[key], +val)}`;
+      } else if (f === 'commit') { if (t.value !== '') a.commit = +val; }
+      else {
+        a[f] = val;
+        if (f === 'per') { const P = PERSONALITIES[val]; for (const x of TEMPER_KEYS) a.st[x] = P[x]; a.style = P.style; }
+        rerender = committed;
+      }
+      if (committed) rerender = true;
     } else if (t.dataset.q) {
       const q = s.sides[+t.dataset.side].slots[+t.dataset.slot], f = t.dataset.q;
       q[f] = val;
+      if (f === 'skill') {
+        if (q.ai) { Object.assign(q.ai.st, SKILL_BASE[val]); if (val === 'drone') q.ai.ord = 'drone'; else if (q.ai.ord === 'drone') q.ai.ord = 'engage'; }
+        rerender = true;
+      }
       if (f === 'pilot') { if (val === 'human' && q.jet === 'random') q.jet = 'choice'; if (val === 'ai' && q.jet === 'choice') q.jet = 'random'; rerender = true; }
       if (f === 'jet') { if (JETS[val] && q.loadout && !JETS[val].loadouts[q.loadout]) q.loadout = ''; rerender = true; }
     }
@@ -268,7 +323,16 @@ export class Builder {
     const b = e.target.closest('button[data-act]');
     if (!b) return;
     const sd = this.s.sides[+b.dataset.side], act = b.dataset.act;
-    if (act === 'del') sd.slots.splice(+b.dataset.slot, 1);
+    const key = b.dataset.side + ':' + b.dataset.slot, q = sd.slots[+b.dataset.slot];
+    if (act === 'aiOpen') this.openAi = this.openAi === key ? null : key;
+    if (act === 'aiClose') this.openAi = null;
+    if (act === 'aiReset' && q) { const a = q.ai || (q.ai = aiConfig(q)); Object.assign(a.st, SKILL_BASE[q.skill]); for (const x of TEMPER_KEYS) a.st[x] = PERSONALITIES[a.per][x]; }
+    if (act === 'aiCopy' && q) {
+      const a = aiConfig(q);
+      for (const o of sd.slots) if (o !== q && o.pilot === 'ai') { o.ai = JSON.parse(JSON.stringify(a)); o.skill = q.skill; }
+      this.note(`Copied to every AI on ${sd.name}.`);
+    }
+    if (act === 'del') { sd.slots.splice(+b.dataset.slot, 1); this.openAi = null; }
     if (act === 'addAi' && sd.slots.length < MAX_PER_SIDE) sd.slots.push(slot('ai', sd.slots.length ? 'lead' : 'random', 'pilot'));
     if (act === 'addHuman' && sd.slots.length < MAX_PER_SIDE) sd.slots.push(slot('human', 'choice', 'pilot'));
     if (act === 'fill') while (sd.slots.length < MAX_PER_SIDE) sd.slots.push(slot('ai', 'random', 'pilot'));

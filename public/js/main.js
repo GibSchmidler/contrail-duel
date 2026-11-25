@@ -13,7 +13,7 @@ import { AIPilot } from './ai.js';
 import { Hud } from './hud.js';
 import { Audio } from './audio.js';
 import { Net, RemotePlane, packState } from './net.js';
-import { PRESETS, sanitize, spawnPoints, resolveJet, summary, encodeScenario, decodeScenario, SIDE_COLORS, countSeats, jetSpecLabel, MAX_PER_SIDE } from './scenario.js';
+import { PRESETS, sanitize, spawnPoints, resolveJet, summary, encodeScenario, decodeScenario, SIDE_COLORS, countSeats, jetSpecLabel, MAX_PER_SIDE, aiConfig, aiLabel } from './scenario.js';
 import { Builder } from './builder.js';
 
 const $ = (id) => document.getElementById(id);
@@ -239,7 +239,7 @@ function buildRoster(scn, seats, choices, names) {
       const L = JETS[type].loadouts;
       const want = q.loadout === 'bvr' && !L.bvr && L.heavy ? 'heavy' : q.loadout;
       const loadout = want && L[want] ? want : human && ch.jet === type && L[ch.loadout] ? ch.loadout : JETS[type].loadoutKeys[0];
-      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, member, human });
+      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member, human });
     });
   });
   return roster;
@@ -251,7 +251,7 @@ function makeEnt(r) {
   if (!local) { plane.setType(r.type); plane.gunAcc = 0; }
   const e = { ...r, local, plane, ai: null, model: null, kills: 0, deaths: 0, lastHit: null, handle: null, aiIn: { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false }, aiOut: null };
   plane.ent = e; plane.side = r.side; plane.netId = G.netId + r.id;
-  if (local && !r.human) e.ai = new AIPilot(plane, r.skill);
+  if (local && !r.human) e.ai = new AIPilot(plane, r.aic || r.skill);
   return e;
 }
 
@@ -403,6 +403,7 @@ net.on('ch', (m) => {
   if (G.mode !== 'online' || !e || e.local) return;
   for (const c of m.c) combat.addChaff(new THREE.Vector3(c[0], c[1], c[2]), new THREE.Vector3(c[3], c[4], c[5]), 'r' + m.id, e.plane);
 });
+net.on('feed', (m) => { if (G.mode === 'online' && G.role === 'guest') feed(String(m.text).slice(0, 80), m.c); });
 net.on('mx', (m) => combat.removeRemoteMissile(m.id, m.p ? new THREE.Vector3(...m.p) : null));
 net.on('toLobby', () => { if (G.role === 'guest') { teardownMatch(); G.mode = null; G.phase = 'menu'; renderLobby(); } });
 net.on('peerLeft', (m) => { if (G.mode === 'online') { for (const e of G.ents) if (e.human && e.member === m.id) { feed(`${e.name} left`, '#cccccc'); if (G.role !== 'host') { e.member = null; e.human = false; } } } });
@@ -417,7 +418,7 @@ function handOverToAI(e) {
   pl.vel.copy(old.vel); pl.stores = old.stores.slice(); pl.updateStores();
   pl.alive = old.alive; pl.hp = old.hp; pl.side = e.side; pl.ent = e; pl.netId = G.netId + e.id; pl.contacts = new Map();
   e.plane = pl; e.local = true; e.human = false; e.member = null; e.name += ' (AI)';
-  e.ai = new AIPilot(pl, 'pilot');
+  e.ai = new AIPilot(pl, e.aic || 'pilot');
 }
 
 function reseat() {
@@ -767,6 +768,13 @@ function frame(now) {
 }
 
 function sideHome(k) { const s = G.scn.sides[k]; return new THREE.Vector3(s.x * 0.6, 3000, s.z * 0.6); }
+function sideStart(k) { const s = G.scn.sides[k]; return new THREE.Vector3(s.x, s.alt, s.z); }
+// AI radio calls go to the kill feed (and from the host to everyone online)
+function radio(e, text) {
+  const line = `${e.name}: ${text}`, color = SIDE_COLORS[e.side];
+  feed(line, color);
+  if (G.mode === 'online' && G.role === 'host') net.send({ t: 'feed', text: line, c: color });
+}
 
 function step(dt, now) {
   G.phaseT -= dt;
@@ -814,9 +822,11 @@ function step(dt, now) {
     if (!pl.alive) continue;
     scanContacts(pl, enemies, dt);
     const picture = datalinkPicture(pl, friends);
-    setTarget(pl, e.ai.pickTarget(enemies, picture));
+    const lead = G.sides[e.side].find((x) => x.plane.alive);
+    const ctx = { friends, enemies, picture, home: sideHome(1 - e.side), base: sideStart(e.side), anchor: sideStart(e.side), lead: lead && lead.plane, idx: e.idx, say: (t) => radio(e, t) };
+    setTarget(pl, e.ai.pickTarget(enemies, picture, ctx));
     const threat = assessThreatsMulti(pl, enemies, enemyMsl[e.side]);
-    const out = e.ai.update(dt, pl.tgt, combat, threat, { friends, home: sideHome(1 - e.side), picture });
+    const out = e.ai.update(dt, pl.tgt, combat, threat, ctx);
     e.aiOut = out;
     const a = e.aiIn;
     a.pitch = out.pitch; a.roll = out.roll; a.yaw = out.yaw; a.throttle = out.throttle; a.airbrake = out.airbrake;

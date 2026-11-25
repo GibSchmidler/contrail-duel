@@ -66,7 +66,7 @@ export class Aircraft {
   }
 
   get ab() { return this.throttle > 1.001; }
-  get radarMode() { return this.alive ? (this.radar.stt ? 2 : 1) : 0; }
+  get radarMode() { return this.alive && !this.radarSilent ? (this.radar.stt ? 2 : 1) : 0; }
   get missiles() { let n = 0; for (const s of this.stores) if (s) n++; return n; }
 
   // Jet type: flight model, sensors, gun and stations all come from aircraft.js.

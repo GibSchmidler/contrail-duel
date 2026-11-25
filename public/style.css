@@ -126,3 +126,19 @@ table.slots td:first-child { color: var(--dim); width: 18px; }
   .grid { grid-template-columns: 1fr; }
 }
 table.slots td:nth-child(2) select { min-width: 74px; }
+
+/* ---- AI editor ---- */
+button.aibtn { width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; font-size: 11.5px; }
+table.slots td:nth-child(3) select { min-width: 120px; }
+table.slots td:nth-child(5) select { min-width: 86px; }
+button.aibtn.on { border-color: var(--accent); background: rgba(157,255,184,0.18); }
+.aiedit { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 2px 0 8px; background: rgba(0,0,0,0.25); }
+.aigrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0 12px; }
+.aigrid label .small { display: block; margin: 4px 0 0; }
+.aistats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; margin-top: 6px; }
+.aistats h4 { margin: 4px 0 6px; font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: 0.05em; }
+label.aistat { display: grid; grid-template-columns: 78px minmax(80px, 1fr) 128px; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 12px; }
+label.aistat input[type=range] { width: 100%; margin: 0; padding: 0; accent-color: var(--accent); }
+label.aistat .an { color: var(--text); }
+label.aistat .av { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+@media (max-width: 1100px) { .aistats { grid-template-columns: 1fr; } }

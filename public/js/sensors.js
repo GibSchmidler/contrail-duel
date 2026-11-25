@@ -37,7 +37,7 @@ export function notchFactor(sensorPos, target) {
 
 // Can this radar see the target right now?
 export function radarSees(plane, target) {
-  if (!target || !target.alive || !plane.alive) return false;
+  if (!target || !target.alive || !plane.alive || plane.radarSilent) return false;
   const RT = plane.radarT || RADARS.apg68;
   _rel.copy(target.pos).sub(plane.pos);
   const dist = _rel.length();
