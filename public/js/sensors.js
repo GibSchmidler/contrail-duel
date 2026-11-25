@@ -39,10 +39,12 @@ export function notchFactor(sensorPos, target) {
 export function radarSees(plane, target) {
   if (!target || !target.alive || !plane.alive || plane.radarSilent) return false;
   const RT = plane.radarT || RADARS.apg68;
+  const rd = plane.dmg ? plane.dmg.radar : 0;
+  if (rd >= 1) return false;            // radar shot out
   _rel.copy(target.pos).sub(plane.pos);
   const dist = _rel.length();
   const lookDown = target.pos.y < plane.pos.y - 60;
-  if (dist > detectRange(RT.range, target, RT.ccm) * (lookDown ? RT.lookDown : 1)) return false;
+  if (dist > detectRange(RT.range, target, RT.ccm) * (lookDown ? RT.lookDown : 1) * (1 - 0.6 * rd)) return false;
   if (_rel.divideScalar(dist).dot(plane.fwd) < Math.cos(RT.gimbal)) return false;
   if (inNotch(plane.pos, target, RT.notchVr)) return false;
   return lineOfSight(plane.pos, target.pos); // radar can't see through a mountain

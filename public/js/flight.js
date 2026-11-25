@@ -66,7 +66,7 @@ export class Aircraft {
   }
 
   get ab() { return this.throttle > 1.001; }
-  get radarMode() { return this.alive && !this.radarSilent ? (this.radar.stt ? 2 : 1) : 0; }
+  get radarMode() { return this.alive && !this.radarSilent && !(this.dmg && this.dmg.radar >= 1) ? (this.radar.stt ? 2 : 1) : 0; }
   get missiles() { let n = 0; for (const s of this.stores) if (s) n++; return n; }
 
   // Jet type: flight model, sensors, gun and stations all come from aircraft.js.
@@ -110,6 +110,9 @@ export class Aircraft {
     this.hp = 100; this.alive = true;
     this.gloc = 0; this.blackedOut = false;
     this.airbrake = false;
+    this.flaps = 0; this.gear = false; this.trim = 0;
+    this.dmg = { eng: 0, wingL: 0, wingR: 0, tail: 0, radar: 0, fuel: 0 };
+    this.fireT = 0; this.landed = null;
     this.setLoadout(loadout);
     this.gunAmmo = this.T.ammo; this.flares = this.T.flares; this.chaff = this.T.chaff;
     this.irst = { contact: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), mem: 0 };
@@ -146,22 +149,32 @@ export class Aircraft {
     this.mach = V / SOUND_SPEED;
 
     // ---- FBW pitch: G command (neutral stick holds the flight path) ----
-    let pitchIn = inp.pitch;
+    const D = this.dmg;
+    let pitchIn = clamp(inp.pitch + (inp.trim || 0), -1, 1);
     if (this.blackedOut) pitchIn = Math.min(pitchIn, 0.1);
+    // flaps and gear: commanded by the pilot, but flaps blow back up when the jet is too fast for them
+    if (inp.flaps != null) this.flaps = inp.flaps;
+    if (inp.gear != null) this.gear = inp.gear;
+    if (this.flaps > 0 && V > FLAP_VMAX) this.flaps = 0;
+    const flap = this.flaps;
+    const gMaxD = JF.gMax * (1 - 0.35 * Math.max(D.wingL, D.wingR) - 0.2 * D.tail) * (flap > 0 ? 0.75 : 1);
     const n0 = Math.max(0, U.y);
-    const nCmd = pitchIn >= 0 ? n0 + pitchIn * (JF.gMax - n0) : n0 + pitchIn * (n0 - JF.gMin);
+    const nCmd = pitchIn >= 0 ? n0 + pitchIn * (gMaxD - n0) : n0 + pitchIn * (n0 - JF.gMin);
+    const clA = JF.clA * (1 + 0.12 * flap), cl0 = 0.35 * flap;
     const clCmd = (nCmd * m * GRAV) / Math.max(qS, 1);
-    const alphaT = clamp(clCmd / JF.clA, -JF.aFbw * 0.6, JF.aFbw);
+    const alphaT = clamp((clCmd - cl0) / clA, -JF.aFbw * 0.6, JF.aFbw);
 
     // ---- Forces ----
-    const cl = liftCoef(this.alpha, JF);
-    const lift = qS * cl;
+    const cl = liftCoef(this.alpha, JF) * (1 + 0.12 * flap) + cl0 * clamp(1 - Math.abs(this.alpha) / (JF.aStall + 0.1), 0, 1);
+    const wingLoss = 1 - 0.3 * (D.wingL + D.wingR) / 2;
+    const lift = qS * cl * wingLoss;
     const liftDir = _ld.crossVectors(R, vhat).normalize();
     const sideDir = _sd.crossVectors(vhat, U).normalize();
     const side = -qS * JF.cyb * this.beta;
     this.airbrake = !!inp.airbrake;
     const cd = JF.cd0 + JF.wave * smooth(0.85, 1.05, this.mach) + JF.k * cl * cl +
       (this.airbrake ? JF.brakeCd : 0) + 0.6 * this.beta * this.beta + this.storeCd +
+      0.03 * flap + (this.gear ? 0.022 : 0) + 0.01 * (D.wingL + D.wingR + D.tail) +
       2.0 * Math.max(0, Math.abs(this.alpha) - 0.4) ** 2; // post-stall: the wing becomes an airbrake
     const drag = qS * cd;
 
@@ -171,6 +184,7 @@ export class Aircraft {
       : JF.thrMil + (JF.thrAB - JF.thrMil) * ((this.eng - 1) / (JF.maxThrottle - 1));
     thrust *= Math.pow(rho / 1.225, 0.7) * (1 + 0.15 * this.mach);
     if (this.hp < 40) thrust *= 0.85;
+    thrust *= 1 - 0.85 * D.eng;   // a damaged engine loses power; a destroyed one barely runs
 
     const a = _a.set(0, -GRAV, 0)
       .addScaledVector(liftDir, lift / m)
@@ -188,11 +202,12 @@ export class Aircraft {
     const w = _w.crossVectors(vhat, ap).divideScalar(V);
     // thrust vectoring keeps pitch authority when there's too little airflow for the tail
     const auth = Math.max(clamp(qbar / 6000, 0.08, 1), JF.tvc * 0.6 * clamp(this.eng, 0, 1));
-    w.addScaledVector(R, 7 * auth * (alphaT - this.alpha));
+    w.addScaledVector(R, 7 * auth * (1 - 0.6 * D.tail) * (alphaT - this.alpha));
     const betaT = -inp.yaw * JF.betaMax;
     w.addScaledVector(U, 5 * auth * (betaT - this.beta));
     const rollAuth = Math.max(clamp(qbar / 14000, 0.12, 1), JF.tvc * 0.35) * (1 - 0.45 * (1 - JF.tvc * 0.5) * clamp(this.alpha / JF.aFbw, 0, 1));
-    const pT = inp.roll * JF.rollMax * rollAuth;
+    // a shot-up wing loses lift on one side: the jet rolls toward it unless the pilot holds it
+    const pT = inp.roll * JF.rollMax * rollAuth * (1 - 0.45 * Math.max(D.wingL, D.wingR)) + (D.wingL - D.wingR) * 0.9 * clamp(qbar / 20000, 0, 1);
     this.p += (pT - this.p) * Math.min(1, dt * 10);
     w.addScaledVector(V > 30 ? vhat : F, this.p);
     this.omega.copy(w);
@@ -215,10 +230,29 @@ export class Aircraft {
     if (this.gloc >= 1) this.blackedOut = true;
     if (this.blackedOut && this.gloc < 0.45) this.blackedOut = false;
 
+    // ---- Fire from a hit fuel tank ----
+    if (this.fireT > 0) { this.fireT -= dt; this.hp -= 2.2 * dt; }
+
     // ---- Ground ----
     if (groundFn && this.pos.y < groundFn(this.pos.x, this.pos.z) + 1.5) return 'crash';
     return null;
   }
+}
+
+export const FLAP_VMAX = 135;   // m/s (~260 kt): faster than this the flaps retract on their own
+export const GEAR_VMAX = 150;   // m/s (~290 kt): the gear can't be lowered faster than this
+// Damage zones. `zone` comes from where the round or blast hit; `dmg` is in hit points.
+const ZONE_HP = { eng: 45, wingL: 55, wingR: 55, tail: 45, radar: 30, fuel: 60 };
+export const ZONE_NAMES = { eng: 'ENGINE', wingL: 'L WING', wingR: 'R WING', tail: 'TAIL', radar: 'RADAR', fuel: 'FUEL' };
+export function damageZone(plane, zone, dmg) {
+  const D = plane.dmg;
+  if (!D || !(zone in D)) return;
+  D[zone] = Math.min(1, D[zone] + dmg / ZONE_HP[zone]);
+  if (zone === 'fuel' && Math.random() < dmg / 40) plane.fireT = Math.max(plane.fireT || 0, 6 + Math.random() * 8);
+}
+export function repair(plane) {
+  plane.hp = 100; plane.fireT = 0;
+  for (const k in plane.dmg) plane.dmg[k] = 0;
 }
 
 // Gun ballistics shared by the gunsight, AI and bullets. Bullets keep their launch

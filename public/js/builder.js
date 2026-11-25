@@ -2,8 +2,10 @@
 // and forms for the rules, both sides and every aircraft slot.
 import { MAPS, TIMES, WEATHER, ARENA_RADIUS, previewHeights } from './world.js';
 import { JETS, JETS_OF, COUNTRIES } from './aircraft.js';
+import { UNITS } from './ground.js';
 import { PRESETS, MAX_PER_SIDE, SKILL_LABELS, FORMATIONS, SIDE_COLORS, sanitize, summary, sideHeading, spawnPoints, countSeats, slot, blankScenario,
   AI_STATS, ABILITY_KEYS, TEMPER_KEYS, SKILL_BASE, PERSONALITIES, STYLES, ORDERS, WEAPON_RULES, PRIORITIES, aiConfig, aiLabel } from './scenario.js';
+import * as BM from './builder_mission.js';
 
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(label)}</option>`;
@@ -27,8 +29,9 @@ function aiEditor(q, k, i) {
       <label>Preferred range <select ${d} data-ai="style">${Object.entries(STYLES).map(([x, v]) => opt(x, v, c.style)).join('')}</select></label>
       <label>Weapons <select ${d} data-ai="wpn">${Object.entries(WEAPON_RULES).map(([x, v]) => opt(x, v, c.wpn)).join('')}</select></label>
       <label>Target priority <select ${d} data-ai="pri">${Object.entries(PRIORITIES).map(([x, v]) => opt(x, v, c.pri)).join('')}</select></label>
-      ${needsCommit ? `<label>Commit range (km) <input type="number" min="3" max="80" value="${Math.round(c.commit)}" ${d} data-ai="commit"></label>` : ''}
+      ${needsCommit || c.ord === 'route' ? `<label>Commit range (km) <input type="number" min="3" max="80" value="${Math.round(c.commit)}" ${d} data-ai="commit"></label>` : ''}
     </div>
+    ${c.ord === 'route' ? `<div class="brow"><button class="mini" data-mact="routeSlot" data-side="${k}" data-slot="${i}">${q.route && q.route.length ? `Route: ${q.route.length} points — add more on the map` : 'Draw the route on the map'}</button>${q.route && q.route.length ? `<button class="mini ghost" data-mact="clearRouteS" data-side="${k}" data-slot="${i}">Clear route</button>` : ''}<span class="dim small">Waypoints are flown at the side's start altitude, in a loop.</span></div>` : ''}
     <div class="aistats">
       <div><h4>Abilities <span class="dim">(start from experience: ${esc(SKILL_LABELS[q.skill])})</span></h4>${ABILITY_KEYS.map(slider).join('')}</div>
       <div><h4>Temperament <span class="dim">(start from personality)</span></h4>${TEMPER_KEYS.map(slider).join('')}</div>
@@ -43,7 +46,7 @@ function aiEditor(q, k, i) {
 const LOADOUT_NAMES = { '': 'Default', dogfight: 'Dogfight (if the jet has it)', bvr: 'Long range (if the jet has it)' };
 
 const mapCache = {};
-function mapImage(key) {
+export function mapImage(key) {
   if (mapCache[key]) return mapCache[key];
   const P = previewHeights(key, 200), n = P.n, pal = MAPS[key].pal;
   const c = document.createElement('canvas');
@@ -68,7 +71,7 @@ function mapImage(key) {
     img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2]; img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
-  return (mapCache[key] = { canvas: c, size: P.size });
+  return (mapCache[key] = { canvas: c, size: P.size, heights: P });
 }
 
 function jetOptions(sel, human, i) {
@@ -95,6 +98,7 @@ export class Builder {
   constructor(root, hooks) {
     this.root = root; this.hooks = hooks;
     this.s = null; this.opts = {}; this.drag = null;
+    this.tab = 'air'; this.ui = { tool: 'drag', unitKey: 's300', unitSide: 1, owner: null };
     root.innerHTML = `
       <div class="bwrap">
         <div class="bhead">
@@ -105,7 +109,8 @@ export class Builder {
         <div class="bbody">
           <div class="bleft">
             <canvas id="bMap"></canvas>
-            <p class="dim small">Drag a circle to move a side's start point. Drag the arrow tip to aim it (or tick <i>auto</i> to face the enemy). Dots show each jet in formation; the dashed ring is the edge of the battle area.</p>
+            <div id="bTools" class="btools"></div>
+            <p class="dim small">Drag a big circle to move a side's start point and its arrow tip to aim it (or tick <i>auto</i> to face the enemy). Dots show each jet in formation; the dashed ring is the edge of the battle area. Ground units, waves (▲), markers, gates, zones and route points can be dragged too; right-click one to delete it.</p>
             <div class="bshare">
               <h3>Share</h3>
               <div class="brow"><button id="bCopyCode">Copy code</button><button id="bCopyLink">Copy link</button></div>
@@ -152,7 +157,18 @@ export class Builder {
     this.form.addEventListener('click', (e) => this.onClick(e));
     this.cv.addEventListener('pointerdown', (e) => this.onDown(e));
     this.cv.addEventListener('pointermove', (e) => this.onMove(e));
-    window.addEventListener('pointerup', () => { this.drag = null; });
+    this.cv.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const h = this.hit(this.evPos(e));
+      if (h && h.del) { h.del(); this.afterMapEdit(); }
+    });
+    $('bTools').addEventListener('change', (e) => {
+      const t = e.target;
+      if (t.dataset.ui === 'tool') { this.ui.tool = t.value; if (t.value !== 'route') this.ui.owner = null; this.renderTools(); }
+      else if (t.dataset.ui) { this.ui[t.dataset.ui] = t.dataset.ui === 'unitSide' ? +t.value : t.value; }
+    });
+    $('bTools').addEventListener('click', (e) => { if (e.target.dataset.act === 'toolDone') { this.ui.tool = 'drag'; this.ui.owner = null; this.renderForm(); this.renderTools(); this.drawMap(); } });
+    window.addEventListener('pointerup', () => { const d = this.drag; this.drag = null; if (d && d.what === 'mission' && d.moved) this.afterMapEdit(); });
     window.addEventListener('resize', () => { if (this.s) this.drawMap(); });
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && root.classList.contains('show')) this.close(); });
   }
@@ -171,6 +187,7 @@ export class Builder {
 
   load(s) {
     this.openAi = null;
+    this.ui.tool = 'drag'; this.ui.owner = null;
     this.s = sanitize(s);
     this.builtIn = PRESETS.some((p) => p.id === this.s.id);
     this.renderForm();
@@ -206,7 +223,10 @@ export class Builder {
     const warn = [];
     if (!seats.human) warn.push('No human seats: everyone will watch the AI fight.');
     const d = Math.hypot(s.sides[0].x - s.sides[1].x, s.sides[0].z - s.sides[1].z);
-    if (d < 3000) warn.push('The sides start very close together.');
+    if (d < 3000 && s.mode === 'battle' && s.sides[1].slots.length) warn.push('The sides start very close together.');
+    if (s.mode === 'race' && s.gates.length < 2) warn.push('A time trial needs at least two gates (Gates tab).');
+    if (s.mode === 'battle' && s.rules.win === 'objectives' && !s.objectives.some((o) => !o.optional)) warn.push('No required objectives: add some in the Objectives tab.');
+    if (s.waves.some((w) => w.when === 'trigger') && !s.triggers.some((t) => t.do === 'spawn')) warn.push('A wave waits for a trigger, but no trigger sends one in.');
     $('bWarn').textContent = warn.join(' ');
     this.drawMap();
   }
@@ -214,7 +234,12 @@ export class Builder {
   // ---------------- form ----------------
   renderForm() {
     const s = this.s;
-    let h = `
+    const tabs = `<div class="btabs">${Object.entries(BM.TABS).map(([k, v]) => {
+      const n = { units: s.units.length, waves: s.waves.length, obj: s.objectives.length, trig: s.triggers.length, marks: s.markers.length, gates: s.gates.length }[k];
+      return `<button class="mini${this.tab === k ? ' on' : ''}" data-tab="${k}">${esc(v)}${n ? ` <span class="dim">${n}</span>` : ''}</button>`;
+    }).join('')}</div>`;
+    if (this.tab !== 'air') { this.form.innerHTML = tabs + BM.missionForm(s, this.tab, this.ui); this.renderTools(); return; }
+    let h = tabs + `
       <section>
         <label class="wide">Name <input data-k="name" maxlength="48" value="${esc(s.name)}"></label>
         <label class="wide">Briefing <input data-k="desc" maxlength="200" value="${esc(s.desc)}" placeholder="A line or two about the mission"></label>
@@ -252,7 +277,7 @@ export class Builder {
           <td><select data-side="${k}" data-slot="${i}" data-q="loadout">${human && q.jet === 'choice' ? opt('', "Pilot's choice", '') : loadoutOptions(q.jet, q.loadout)}</select></td>
           <td><select data-side="${k}" data-slot="${i}" data-q="skill" title="${human ? 'Used if no human takes this seat' : ''}">${Object.entries(SKILL_LABELS).map(([sk, n]) => opt(sk, n, q.skill)).join('')}</select></td>
           <td><button class="mini aibtn${this.openAi === k + ':' + i ? ' on' : ''}" data-act="aiOpen" data-side="${k}" data-slot="${i}" title="${human ? 'How the AI flies this seat if no human takes it' : 'Edit how this AI fights'}">⚙ ${esc(aiLabel(q))}</button></td>
-          <td>${sd.slots.length > 1 ? `<button class="mini ghost" data-act="del" data-side="${k}" data-slot="${i}" title="Remove">✕</button>` : ''}</td>
+          <td>${sd.slots.length > 1 || (k === 1 && (s.mode !== 'battle' || s.units.some((u) => u.side === 1) || s.waves.some((w) => w.side === 1))) ? `<button class="mini ghost" data-act="del" data-side="${k}" data-slot="${i}" title="Remove">✕</button>` : ''}</td>
         </tr>`;
         if (this.openAi === k + ':' + i) h += `<tr><td></td><td colspan="6">${aiEditor(q, k, i)}</td></tr>`;
       });
@@ -266,13 +291,38 @@ export class Builder {
     });
     h += `<p class="dim small">Human seats are for players in an online room; in practice you take the first human seat and the AI flies any other. Empty human seats are flown by the AI using the experience and behaviour shown. Press ⚙ to give any AI its own personality, orders and stats.</p>`;
     this.form.innerHTML = h;
+    this.renderTools();
+  }
+
+  renderTools() {
+    const ui = this.ui, s = this.s;
+    const tools = Object.entries(BM.TOOLS).filter(([k]) => k !== 'route' || ui.tool === 'route');
+    let h = `<label>Click on the map to <select data-ui="tool">${tools.map(([k, v]) => opt(k, v, ui.tool)).join('')}</select></label>`;
+    if (ui.tool === 'unit') h += `<select data-ui="unitKey">${Object.keys(UNITS).map((k) => opt(k, UNITS[k].name, ui.unitKey)).join('')}</select><select data-ui="unitSide">${opt('0', s.sides[0].name, String(ui.unitSide))}${opt('1', s.sides[1].name, String(ui.unitSide))}</select>`;
+    if (ui.tool === 'route') h += `<span class="small">Adding waypoints for <b>${esc(BM.ownerName(s, ui.owner))}</b></span>`;
+    if (ui.tool !== 'drag') h += `<button class="mini" data-act="toolDone">Done</button>`;
+    this.$('bTools').innerHTML = h;
+  }
+
+  afterMapEdit() {
+    const id = this.s.id;
+    this.s = sanitize(this.s); this.s.id = id;
+    this.renderForm(); this.refresh();
   }
 
   onField(e, committed) {
     const t = e.target, s = this.s;
     const val = t.type === 'checkbox' ? t.checked : t.value;
     let rerender = false;
-    if (t.dataset.k) {
+    if (t.dataset.ui) { this.ui[t.dataset.ui] = t.dataset.ui === 'unitSide' ? +t.value : t.value; if (committed) this.renderTools(); return; }
+    if (t.dataset.m) {
+      if (t.dataset.m === 'briefing') { s.briefing = t.value.slice(0, 1500); return; }
+      if (!committed && (t.tagName === 'SELECT' || t.type === 'checkbox')) return;
+      rerender = BM.setField(s, t);
+    } else if (t.dataset.mlist) {
+      if (!committed) return;
+      BM.toggleList(s, t);
+    } else if (t.dataset.k) {
       const k = t.dataset.k;
       if (k === 'rounds' || k === 'timeLimit') { if (!committed && t.value === '') return; s[k] = +val; }
       else s[k] = val;
@@ -320,6 +370,16 @@ export class Builder {
   }
 
   onClick(e) {
+    const tb = e.target.closest('button[data-tab]');
+    if (tb) { this.tab = tb.dataset.tab; this.renderForm(); this.form.scrollTop = 0; return; }
+    const mb = e.target.closest('button[data-mact]');
+    if (mb) {
+      const unitKey = this.form.querySelector('[data-ui="unitKey"]'), unitSide = this.form.querySelector('[data-ui="unitSide"]');
+      if (unitKey) this.ui.unitKey = unitKey.value;
+      if (unitSide) this.ui.unitSide = +unitSide.value;
+      if (BM.action(this.s, mb, this.ui)) this.afterMapEdit();
+      return;
+    }
     const b = e.target.closest('button[data-act]');
     if (!b) return;
     const sd = this.s.sides[+b.dataset.side], act = b.dataset.act;
@@ -349,8 +409,29 @@ export class Builder {
     return [cx + Math.sin(a) * 46, cy - Math.cos(a) * 46];
   }
   evPos(e) { const r = this.cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+  // the mission object (unit, marker, gate...) under the pointer, if any
+  hit([mx, my]) {
+    for (const h of BM.handles(this.s, this.ui)) {
+      const [x, z] = h.get(), [px, py] = this.toPx(x, z);
+      if (Math.hypot(mx - px, my - py) < h.r) return h;
+    }
+    return null;
+  }
+  heightAt(x, z) {
+    const M = mapImage(this.s.map), P = M.heights, n = P.n, f = n / P.size;
+    const j = Math.max(0, Math.min(n, Math.round(x * f + n / 2))), i = Math.max(0, Math.min(n, Math.round(z * f + n / 2)));
+    return P.h[i * (n + 1) + j];
+  }
   onDown(e) {
+    if (e.button === 2) return;
     const [mx, my] = this.evPos(e);
+    const mh = this.ui.tool === 'drag' || this.ui.tool === 'route' ? this.hit([mx, my]) : null;
+    if (mh && !(this.ui.tool === 'route' && mh.kind !== 'rpt')) { this.drag = { what: 'mission', h: mh }; this.cv.setPointerCapture(e.pointerId); e.preventDefault(); return; }
+    if (this.ui.tool !== 'drag') {
+      const [wx, wz] = this.toWorld(mx, my);
+      if (BM.place(this.s, this.ui, wx, wz, (x, z) => this.heightAt(x, z))) this.afterMapEdit();
+      return;
+    }
     for (let k = 1; k >= 0; k--) {
       const [hx, hy] = this.handle(k);
       if (Math.hypot(mx - hx, my - hy) < 14) { this.drag = { k, what: 'hdg' }; break; }
@@ -362,16 +443,23 @@ export class Builder {
   onMove(e) {
     const [mx, my] = this.evPos(e);
     if (!this.drag) {
-      let over = false;
+      let over = this.ui.tool !== 'drag' || !!this.hit([mx, my]);
       for (let k = 0; k < 2; k++) {
         const [hx, hy] = this.handle(k), [cx, cy] = this.toPx(this.s.sides[k].x, this.s.sides[k].z);
         if (Math.hypot(mx - hx, my - hy) < 14 || Math.hypot(mx - cx, my - cy) < 18) over = true;
       }
-      this.cv.style.cursor = over ? 'grab' : 'default';
+      this.cv.style.cursor = this.ui.tool !== 'drag' && !this.hit([mx, my]) ? 'crosshair' : over ? 'grab' : 'default';
+      return;
+    }
+    const [wx, wz] = this.toWorld(mx, my);
+    if (this.drag.what === 'mission') {
+      const d = Math.hypot(wx, wz), lim = ARENA_RADIUS - 300, f = d > lim ? lim / d : 1;
+      this.drag.h.set(Math.round((wx * f) / 50) * 50, Math.round((wz * f) / 50) * 50);
+      this.drag.moved = true;
+      this.drawMap();
       return;
     }
     const sd = this.s.sides[this.drag.k];
-    const [wx, wz] = this.toWorld(mx, my);
     if (this.drag.what === 'pos') {
       let x = wx, z = wz;
       const d = Math.hypot(x, z), lim = ARENA_RADIUS - 1500;
@@ -416,14 +504,17 @@ export class Builder {
     const [ox, oy] = this.toPx(0, 0), R = (ARENA_RADIUS / (2 * VIEW)) * css;
     ctx.setLineDash([6, 5]); ctx.strokeStyle = 'rgba(255,220,120,0.8)'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(ox, oy, R, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    BM.drawMission(ctx, s, (x, z) => this.toPx(x, z), css / (2 * VIEW), this.ui);
     // separation line
     const [ax, ay] = this.toPx(s.sides[0].x, s.sides[0].z), [bx, by] = this.toPx(s.sides[1].x, s.sides[1].z);
-    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.setLineDash([3, 4]);
-    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); ctx.setLineDash([]);
     const km = Math.hypot(s.sides[0].x - s.sides[1].x, s.sides[0].z - s.sides[1].z) / 1000;
     ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3;
-    ctx.strokeText(`${km.toFixed(1)} km`, (ax + bx) / 2, (ay + by) / 2 - 6); ctx.fillText(`${km.toFixed(1)} km`, (ax + bx) / 2, (ay + by) / 2 - 6);
+    if (s.sides[1].slots.length && s.mode !== 'race') {
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3;
+      ctx.strokeText(`${km.toFixed(1)} km`, (ax + bx) / 2, (ay + by) / 2 - 6); ctx.fillText(`${km.toFixed(1)} km`, (ax + bx) / 2, (ay + by) / 2 - 6);
+    }
     // jets in formation
     const sp = spawnPoints(s, null);
     for (let k = 0; k < 2; k++) {

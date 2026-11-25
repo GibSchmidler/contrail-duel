@@ -50,9 +50,16 @@ export class Hud {
       this.radar(S, scale);
       this.rwr(S, scale);
       this.dlz(S, scale);
+      this.ground(S, scale);
+      this.ccip(S, scale);
+      this.systems(S, scale);
       this.warnings(S, scale);
+      this.radioMenu(S, scale);
     }
+    this.markers(S, scale);
     this.target(S, scale);
+    this.mission(S, scale);
+    this.lesson(S, scale);
     this.scoreboard(S, scale);
     this.bannerDraw(dt, scale);
     if (S.ping != null) {
@@ -357,8 +364,8 @@ export class Hud {
   weapons(S, sc) {
     const c = this.ctx, P = S.plane, w = this.w, h = this.h;
     const x = w - 24 * sc;
-    let y = h - 176 * sc;
     const lh = 20 * sc;
+    let y = h - 176 * sc - (S.ag ? lh : 0);
     c.textAlign = 'right';
     c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`;
     // remember which types this jet started with so the rows keep their names at zero
@@ -371,6 +378,7 @@ export class Hud {
     };
     row(`1 SRM ${srm ? WEAPONS[srm].name : '—'} ×${nS}`, P.weapon === 'srm', nS > 0);
     row(`2 MRM ${mrm ? WEAPONS[mrm].name : '—'} ×${nM}`, P.weapon === 'mrm', nM > 0 || P.weapon !== 'mrm');
+    if (S.ag) row(`3 ${S.ag.cls} ${S.ag.name} ×${S.ag.n}${S.ag.kinds > 1 ? ' +' : ''}`, P.weapon === 'ag', S.ag.n > 0);
     row(P.T.gun === 'none' ? 'NO GUN' : `GUN ${P.gunT.name.split(' ')[0]} ${P.gunAmmo}`, false, P.gunAmmo > 0);
     row(`FLR ${P.flares}  CHF ${P.chaff}`, false, P.flares > 0 || P.chaff > 0);
     // radar status + my AMRAAMs in flight
@@ -578,6 +586,204 @@ export class Hud {
       c.fillText(b.sub, this.w / 2, this.h * 0.24 + 38 * sc);
     }
     c.globalAlpha = 1;
+  }
+
+  // Ground units I know about: SAM/AAA sites, ships, targets. Diamond = enemy, square box =
+  // designated A/G target (fills as the seeker locks), circle = friendly ship.
+  ground(S, sc) {
+    const c = this.ctx, list = S.gnd;
+    if (!list || !list.length) return;
+    c.font = `${Math.round(11 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'center';
+    for (const g of list) {
+      const p = S.project(g.pos);
+      if (p.behind || p.x < -40 || p.x > this.w + 40 || p.y < -40 || p.y > this.h + 40) continue;
+      const s = (g.tgt ? 12 : 7) * sc;
+      const col = g.friend ? CYAN : g.emit ? AMBER : g.dead ? 'rgba(157,255,184,0.35)' : GREEN;
+      c.strokeStyle = col; c.fillStyle = col;
+      if (g.friend) { c.beginPath(); c.arc(p.x, p.y, s, 0, Math.PI * 2); c.stroke(); }
+      else if (g.tgt) {
+        c.strokeRect(p.x - s, p.y - s, 2 * s, 2 * s);
+        if (g.lock != null) {
+          // seeker lock progress: corner brackets close in
+          const k = 1 - g.lock, e = s + 10 * sc * k;
+          c.strokeStyle = g.lock >= 1 ? RED : AMBER;
+          for (const [dx, dy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+            c.beginPath(); c.moveTo(p.x + dx * e, p.y + dy * (e - 6 * sc)); c.lineTo(p.x + dx * e, p.y + dy * e); c.lineTo(p.x + dx * (e - 6 * sc), p.y + dy * e); c.stroke();
+          }
+          if (g.lock >= 1) { c.fillStyle = RED; c.fillText('LOCK', p.x, p.y + s + 24 * sc); }
+        }
+      } else { c.beginPath(); c.moveTo(p.x, p.y - s); c.lineTo(p.x + s, p.y); c.lineTo(p.x, p.y + s); c.lineTo(p.x - s, p.y); c.closePath(); c.stroke(); }
+      if (g.emit && !g.friend) { c.fillStyle = AMBER; c.fillText(g.code || 'SAM', p.x, p.y - s - 8 * sc); }
+      if (g.tgt || g.dist < 6000) {
+        c.fillStyle = col;
+        c.fillText(`${g.name}${g.how === 'intel' ? ' (intel)' : ''} ${(g.dist / 1000).toFixed(1)}`, p.x, p.y + s + 10 * sc);
+      }
+    }
+  }
+
+  // Continuously computed impact point for bombs and rockets, with the bomb fall line.
+  ccip(S, sc) {
+    const C = S.ccip;
+    if (!C) return;
+    const c = this.ctx, p = S.project(C.pos), f = S.fpm ? S.project(S.fpm) : null;
+    if (p.behind) {
+      c.fillStyle = AMBER; c.textAlign = 'center'; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillText('CCIP — NOSE DOWN TO SEE THE IMPACT POINT', this.w / 2, this.h / 2 + 100 * sc);
+      return;
+    }
+    const x = Math.max(10, Math.min(this.w - 10, p.x)), y = Math.max(10, Math.min(this.h - 10, p.y));
+    c.strokeStyle = S.ccipHot ? RED : GREEN; c.fillStyle = c.strokeStyle;
+    if (f && !f.behind) { c.setLineDash([6 * sc, 5 * sc]); c.beginPath(); c.moveTo(f.x, f.y); c.lineTo(x, y); c.stroke(); c.setLineDash([]); }
+    c.beginPath(); c.arc(x, y, 14 * sc, 0, Math.PI * 2); c.stroke();
+    c.beginPath(); c.arc(x, y, 2 * sc, 0, Math.PI * 2); c.fill();
+    c.font = `${Math.round(11 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'left';
+    c.fillText(`${C.t.toFixed(1)}s`, x + 18 * sc, y);
+    if (S.ccipHot && Math.floor(this.flashT * 4) % 2 === 0) { c.textAlign = 'center'; c.fillText('ON TARGET', x, y - 24 * sc); }
+  }
+
+  // Flaps, gear, trim, speed brake, and a damage diagram of the jet.
+  systems(S, sc) {
+    const c = this.ctx, Y = S.sys;
+    if (!Y) return;
+    const x = 24 * sc;
+    let y = this.h - 120 * sc;
+    c.textAlign = 'left'; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+    const tag = (txt, col) => { c.fillStyle = col; c.fillText(txt, x, y); y -= 17 * sc; };
+    if (Y.fire) tag(Math.floor(this.flashT * 4) % 2 ? 'FIRE!' : '', RED);
+    if (Y.gear) tag(Y.gearOver ? 'GEAR — OVERSPEED' : 'GEAR DOWN', Y.gearOver ? RED : GREEN);
+    if (Y.flaps > 0) tag(`FLAPS ${Y.flaps === 1 ? 'FULL' : 'HALF'}${Y.flapsOver ? ' — BLOWN UP' : ''}`, Y.flapsOver ? AMBER : GREEN);
+    if (Y.brake) tag('SPD BRK', AMBER);
+    if (Math.abs(Y.trim) > 0.01) tag(`TRIM ${Y.trim > 0 ? 'NOSE UP' : 'NOSE DN'} ${Math.round(Math.abs(Y.trim) * 100)}`, CYAN);
+    // damage diagram (only once something is hit)
+    const D = Y.dmg;
+    if (!D || !Object.values(D).some((v) => v > 0.02)) return;
+    const col = (v) => (v >= 1 ? RED : v >= 0.5 ? AMBER : v > 0.02 ? '#e8f070' : 'rgba(157,255,184,0.5)');
+    const cx = 230 * sc, cy = this.h - 112 * sc, k = sc * 1.1;
+    c.lineWidth = 2 * sc;
+    const poly = (pts, v) => { c.fillStyle = col(v); c.beginPath(); pts.forEach(([px, py], i) => (i ? c.lineTo : c.moveTo).call(c, cx + px * k, cy + py * k)); c.closePath(); c.fill(); };
+    poly([[-4, -34], [4, -34], [5, -22], [-5, -22]], D.radar);            // nose / radar
+    poly([[-5, -22], [5, -22], [6, 10], [-6, 10]], D.fuel);               // fuselage tanks
+    poly([[-6, -6], [-36, 10], [-36, 16], [-6, 12]], D.wingL);            // left wing
+    poly([[6, -6], [36, 10], [36, 16], [6, 12]], D.wingR);                // right wing
+    poly([[-6, 10], [6, 10], [5, 26], [-5, 26]], D.eng);                  // engine
+    poly([[-5, 22], [-16, 32], [16, 32], [5, 22]], D.tail);               // tail
+    c.lineWidth = 1.6 * sc;
+    c.fillStyle = 'rgba(255,255,255,0.7)'; c.textAlign = 'center'; c.font = `${Math.round(10 * sc)}px "Consolas","Menlo",monospace`;
+    c.fillText('DAMAGE', cx, cy + 44 * k);
+  }
+
+  // Briefing map markers projected into the view.
+  markers(S, sc) {
+    const c = this.ctx, list = S.marks;
+    if (!list || !list.length || !S.plane.alive) return;
+    const COL = { wp: CYAN, target: RED, danger: AMBER, info: '#ffffff', home: GREEN };
+    c.font = `${Math.round(11 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'center';
+    for (const m of list) {
+      const p = S.project(m.pos);
+      if (p.behind) continue;
+      const col = COL[m.icon] || '#ffffff';
+      c.strokeStyle = col; c.fillStyle = col;
+      const s = 6 * sc;
+      c.beginPath(); c.moveTo(p.x, p.y + s); c.lineTo(p.x - s, p.y - s); c.lineTo(p.x + s, p.y - s); c.closePath(); c.stroke();
+      c.fillText(`${m.label || m.icon.toUpperCase()} ${(m.dist / 1000).toFixed(0)}km`, p.x, p.y - s - 9 * sc);
+    }
+  }
+
+  // Objectives, mission score, survival wave, time trial, deck status and respawn timer.
+  mission(S, sc) {
+    const c = this.ctx, w = this.w, h = this.h;
+    c.textAlign = 'left'; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+    let y = 96 * sc;
+    const x = 18 * sc;
+    if (S.missionTitle) { c.fillStyle = '#ffffff'; c.fillText(S.missionTitle, x, y); y += 19 * sc; }
+    for (const o of S.obj || []) {
+      const mark = o.state === 'done' ? '✔' : o.state === 'failed' ? '✖' : '▢';
+      c.fillStyle = o.state === 'done' ? GREEN : o.state === 'failed' ? RED : o.optional ? 'rgba(255,255,255,0.6)' : '#ffffff';
+      const pr = o.state === 'active' && o.prog > 0 && o.prog < 1 ? ` ${Math.round(o.prog * 100)}%` : '';
+      c.fillText(`${mark} ${o.label}${o.optional ? ' (optional)' : ''}${pr}`, x, y); y += 18 * sc;
+    }
+    if (S.missionScore) { c.fillStyle = AMBER; c.fillText(S.missionScore, x, y); y += 18 * sc; }
+    // time trial
+    const R = S.race;
+    if (R) {
+      c.textAlign = 'center'; c.font = `bold ${Math.round(22 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillStyle = R.high > 0 ? (Math.floor(this.flashT * 5) % 2 ? RED : AMBER) : '#ffffff';
+      c.fillText(R.time, w / 2, 92 * sc);
+      c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff';
+      c.fillText(`GATE ${Math.min(R.next + 1, R.gates)}/${R.gates}${R.laps > 1 ? `  LAP ${R.lap}/${R.laps}` : ''}${R.pen > 0 ? `  +${R.pen.toFixed(1)}s` : ''}${R.best ? `  BEST ${R.best}` : ''}`, w / 2, 114 * sc);
+      if (R.high > 0) { c.fillStyle = RED; c.fillText(`TOO HIGH — get below ${R.ceiling} m above the ground`, w / 2, 134 * sc); }
+      if (R.gate && S.plane.alive && !R.done) {
+        const p = S.project(R.gate);
+        if (!p.behind && p.x > 0 && p.x < w && p.y > 0 && p.y < h) {
+          c.strokeStyle = GREEN; c.beginPath(); c.arc(p.x, p.y, 9 * sc, 0, Math.PI * 2); c.stroke();
+          c.fillStyle = GREEN; c.fillText(`${(R.dist / 1000).toFixed(1)} km`, p.x, p.y + 22 * sc);
+        } else {
+          // arrow on the edge pointing toward the next gate
+          const cs = S.camSpace(R.gate);
+          const a = Math.atan2(-cs.y, cs.x), Rr = Math.min(w, h) * 0.38;
+          c.save(); c.translate(w / 2 + Math.cos(a) * Rr, h / 2 + Math.sin(a) * Rr); c.rotate(a);
+          c.fillStyle = GREEN; c.beginPath(); c.moveTo(16 * sc, 0); c.lineTo(-8 * sc, -10 * sc); c.lineTo(-8 * sc, 10 * sc); c.closePath(); c.fill();
+          c.restore();
+        }
+      }
+    }
+    c.textAlign = 'center';
+    if (S.deck) { c.font = `bold ${Math.round(17 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = CYAN; c.fillText(S.deck, w / 2, h * 0.62); }
+    if (S.respawn != null) { c.font = `bold ${Math.round(18 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff'; c.fillText(`Back in the fight in ${Math.ceil(S.respawn)} s`, w / 2, h * 0.62); }
+    if (S.carrierCue && S.plane.alive) {
+      // carrier approach: glideslope / lineup cue
+      const K = S.carrierCue;
+      c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillStyle = K.ok ? GREEN : AMBER;
+      c.fillText(`${K.name} ${(K.dist / 1000).toFixed(1)} km · ${K.line} · ${K.slope}${K.gear ? '' : ' · GEAR UP (J)'}`, w / 2, h * 0.66);
+    }
+  }
+
+  wrap(text, maxW) {
+    const c = this.ctx, out = [];
+    let line = '';
+    for (const word of text.split(' ')) {
+      const t = line ? line + ' ' + word : word;
+      if (c.measureText(t).width > maxW && line) { out.push(line); line = word; } else line = t;
+    }
+    if (line) out.push(line);
+    return out;
+  }
+  // training lesson prompt (top centre)
+  lesson(S, sc) {
+    const L = S.lesson;
+    if (!L) return;
+    const c = this.ctx, w = this.w;
+    const bw = Math.min(680 * sc, w - 40), x = (w - bw) / 2, pad = 12 * sc;
+    c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`;
+    const lines = this.wrap(L.text, bw - pad * 2);
+    c.font = `${Math.round(12.5 * sc)}px "Consolas","Menlo",monospace`;
+    const hints = L.hint ? this.wrap(L.hint, bw - pad * 2) : [];
+    const y0 = 128 * sc, bh = pad * 2 + 20 * sc + lines.length * 20 * sc + hints.length * 17 * sc + (hints.length ? 6 * sc : 0);
+    c.shadowBlur = 0;
+    c.fillStyle = L.done ? 'rgba(20,80,40,0.72)' : 'rgba(0,0,0,0.55)'; c.fillRect(x, y0, bw, bh);
+    c.strokeStyle = L.done ? GREEN : 'rgba(157,255,184,0.5)'; c.strokeRect(x, y0, bw, bh);
+    c.textAlign = 'left';
+    let y = y0 + pad + 8 * sc;
+    c.font = `bold ${Math.round(12.5 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = GREEN;
+    c.fillText(`${L.name.toUpperCase()} · STEP ${L.n}/${L.of}${L.done ? '   ✔ DONE' : ''}`, x + pad, y); y += 22 * sc;
+    c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff';
+    for (const t of lines) { c.fillText(t, x + pad, y); y += 20 * sc; }
+    c.font = `${Math.round(12.5 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = 'rgba(255,255,255,0.65)';
+    y += 6 * sc;
+    for (const t of hints) { c.fillText(t, x + pad, y); y += 17 * sc; }
+    c.shadowBlur = 3;
+  }
+
+  radioMenu(S, sc) {
+    if (!S.radio) return;
+    const c = this.ctx, x = 18 * sc;
+    let y = this.h * 0.42;
+    c.fillStyle = 'rgba(0,0,0,0.45)'; c.fillRect(x - 8 * sc, y - 22 * sc, 260 * sc, (S.radio.length + 1.6) * 19 * sc);
+    c.textAlign = 'left'; c.font = `bold ${Math.round(14 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = CYAN;
+    c.fillText('RADIO — WINGMEN', x, y); y += 22 * sc;
+    c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff';
+    S.radio.forEach((t, i) => { c.fillText(`${i + 1}  ${t}`, x, y); y += 19 * sc; });
   }
 
   vignette(S) {

@@ -1,11 +1,19 @@
 import * as THREE from 'three';
-import { Aircraft, computeLeadDir, airDensity } from './flight.js';
+import { Aircraft, computeLeadDir, airDensity, damageZone, repair, GEAR_VMAX, FLAP_VMAX, ZONE_NAMES } from './flight.js';
 import { World, groundHeight, ARENA_RADIUS, visRange, lineOfSight } from './world.js';
-import { buildJet } from './models.js';
+import { buildJet, addNoseArt } from './models.js';
 import { Effects } from './effects.js';
 import { Combat } from './weapons.js';
 import { updateRadar, updateIrLock, updateIrst, scanContacts, datalinkPicture, assessThreatsMulti } from './sensors.js';
-import { WEAPONS, GUNS, RADARS, firstOf, countOf, nextStation, flyout, launchZone } from './arsenal.js';
+import { WEAPONS, GUNS, RADARS, firstOf, countOf, nextStation, flyout, launchZone, agKinds, countKey, AG_LABEL } from './arsenal.js';
+import { Unit, UnitView, packUnits, applyUnits, UNITS } from './ground.js';
+import { impactPoint, stationOf, scanGround, pickGround, releaseCheck, updateAgLock } from './strike.js';
+import { surfaceFn, tryLand, land, deckStep, deckStatus } from './carrier.js';
+import { Mission, Race, defaultLabel } from './mission.js';
+import { Lesson, LESSONS } from './training.js';
+import { Recorder, drawAar, drawBrief } from './recorder.js';
+import { Profile, renderProfile, MEDAL_BY_ID } from './profile.js';
+import { sanitizeArt } from './noseart.js';
 import { JETS, COUNTRIES, JETS_OF, jetOf, DEFAULT_JET } from './aircraft.js';
 import { Wrecks } from './wreck.js';
 import { Input } from './input.js';
@@ -25,6 +33,7 @@ const settings = Object.assign({ name: 'Viper', invert: false, sound: true, jet:
 })());
 if (!JETS[settings.jet]) settings.jet = DEFAULT_JET;
 if (!JETS[settings.jet].loadouts[settings.loadout]) settings.loadout = JETS[settings.jet].loadoutKeys[0];
+function myChoice() { return { jet: settings.jet, loadout: settings.loadout, art: sanitizeArt(settings.art) }; }
 function saveSettings() { try { localStorage.setItem('contrail-settings', JSON.stringify(settings)); } catch {} }
 
 const userScenarios = (() => { try { return (JSON.parse(localStorage.getItem('contrail-scenarios') || '[]') || []).map(sanitize); } catch { return []; } })();
@@ -42,13 +51,19 @@ function storeScenario(s) {
 
 // ---------------- engine setup ----------------
 const canvas = $('game');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+// Without WebGL (blocked or unsupported) the game still runs, just without a 3D view.
+let noWebGL = false;
+const renderer = (() => {
+  try { return new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' }); }
+  catch (err) { noWebGL = true; let pr = 1; return { setPixelRatio(p) { pr = p; }, getPixelRatio: () => pr, setSize() {}, render() {} }; }
+})();
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(68, 1, 0.5, 200000);
 camera.position.set(0, 3200, 9000);
 const world = new World(scene);
 const effects = new Effects(scene);
+const unitView = new UnitView(scene, effects);
 const audio = new Audio();
 const hud = new Hud($('hud'));
 const input = new Input();
@@ -81,11 +96,15 @@ const G = {
   msg: '', msgT: 0, attract: 0, dlz: null, dlzT: 0, threat: null,
   death: null, camFocus: new THREE.Vector3(), slowT: 0, timeScale: 1, shake: 0,
   spectate: null, specQuat: new THREE.Quaternion(), feed: [], tgtT: 0, tgtManualT: 0, pullUp: false, freeCam: false,
+  units: [], ground: new Map(), groundT: 0, marked: new Set(), mission: null, race: null, surface: groundHeight,
+  spawnSeq: 300, radioMenu: false, unitSendT: 0, wakeT: 0, wake: [false, false],
 };
 const myPlane = () => (G.mine ? G.mine.plane : null);
 const isAuthority = () => G.mode === 'ai' || (G.mode === 'online' && G.role === 'host');
 const hot = () => G.phase === 'fight' || G.phase === 'roundEnd';
-const resolveSlot = (sl) => (G.byId[sl] ? G.byId[sl].plane : null);
+const resolveSlot = (sl) => { const x = G.byId[sl]; return x ? (x.unit ? x : x.plane) : null; };
+// "SA-10" for a ground unit, "Viper 2 · F-16C" for an aircraft
+const whoName = (k) => (k ? (k.unit ? `${k.name} (${k.fullName})` : `${k.name} · ${jetOf(k.plane.type).name}`) : '');
 function flash(text, t = 1.6) { G.msg = text; G.msgT = t; }
 function feed(text, color) { G.feed.unshift({ text, color, t: 7 }); if (G.feed.length > 6) G.feed.pop(); }
 
@@ -95,6 +114,7 @@ function ensureModel(e) {
   if (e.model && e.model.type === type) return e.model;
   if (e.model) { scene.remove(e.model.group); e.model.dispose(); }
   const j = buildJet(type);
+  if (e.art) addNoseArt(j, type, sanitizeArt(e.art));
   const tip = j.model.wing.pts.reduce((a, b) => (b[0] > a[0] || (b[0] === a[0] && b[1] > a[1]) ? b : a));
   j.tip = [tip[0] + 0.1, j.model.wing.y || 0, tip[1]];
   j.group.visible = false;
@@ -105,27 +125,51 @@ function ensureModel(e) {
 
 // ---------------- combat hooks ----------------
 const combat = new Combat(scene, effects, audio, {
-  onDamage(target, dmg, kind, shooter) {
+  onDamage(target, dmg, kind, shooter, pos, zone) {
     const P = myPlane();
-    if (P && shooter === P && target !== P) { hud.hitT = 0.15; audio.hit(); }
+    if (P && shooter === P && target !== P) {
+      hud.hitT = 0.15; audio.hit();
+      if (G.stats && hot()) { if (kind === 'gun') G.stats.gunHits++; else if (kind === 'msl') G.stats.mslHits++; else G.stats.agHits++; }
+    }
     if (!hot()) return;
     const te = target.ent;
     if (!te) return;
     const by = shooter && shooter.ent ? shooter.ent.id : -1;
-    if (te.local) applyDamage(te, dmg, kind, by);
-    else net.send({ t: 'hit', to: te.member != null ? te.member : G.hostId, sl: te.id, d: dmg, k: kind, by });
+    if (te.local) applyDamage(te, dmg, kind, by, zone);
+    else net.send({ t: 'hit', to: te.unit ? G.hostId : te.member != null ? te.member : G.hostId, sl: te.id, d: dmg, k: kind, by, z: zone || null });
+  },
+  // bombs, rockets and A/G missiles: blast damage to every enemy unit nearby
+  onBlast(pos, w, owner, direct) {
+    if (!hot() || !owner) return;
+    for (const u of G.units) {
+      if (!u.alive || u.side === owner.side) continue;
+      const d = Math.max(0, Math.hypot(pos.x - u.pos.x, pos.z - u.pos.z) - u.r * 0.7) + Math.max(0, pos.y - (u.base + u.h)) * 0.5;
+      let dmg = u === direct ? w.dmg : d < w.blast ? w.dmg * (1 - d / w.blast) : 0;
+      if (dmg <= 0) continue;
+      if (u.D.hard && w.dmg < 300) dmg *= 0.35;           // bunkers shrug off small warheads
+      dmg *= 1 - (u.armor || 0) * 0.35;
+      this.onDamage(u, dmg, w.cls === 'rkt' ? 'rkt' : 'bomb', owner, pos);
+    }
   },
   onMissileGone(m, exploded, pos) {
     if (G.mode === 'online' && m.owner && m.owner.ent && m.owner.ent.local) net.send({ t: 'mx', id: m.id, p: pos ? [pos.x, pos.y, pos.z] : null });
   },
 });
 
-function applyDamage(e, dmg, kind, by = -1) {
+function applyDamage(e, dmg, kind, by = -1, zone = null) {
+  if (e.unit) { damageUnit(e, dmg, kind, by); return; }
   const pl = e.plane;
   if (!pl.alive) return;
   pl.hp -= dmg;
+  if (zone && pl.dmg) {
+    const before = pl.dmg[zone];
+    damageZone(pl, zone, dmg);
+    if (e === G.mine && before < 1 && pl.dmg[zone] >= 1) flash(`${ZONE_NAMES[zone]} DESTROYED`, 2.4);
+    else if (e === G.mine && before < 0.5 && pl.dmg[zone] >= 0.5) flash(`${ZONE_NAMES[zone]} DAMAGED`, 1.6);
+  }
   if (by >= 0 && by !== e.id) e.lastHit = { by, t: G.time, kind };
   if (e === G.mine) {
+    profile.hit();
     hud.damageT = Math.min(0.5, hud.damageT + (kind === 'msl' ? 0.5 : 0.12)); audio.damage(kind);
     G.shake = Math.max(G.shake, kind === 'msl' ? 1.6 : 0.25);
   }
@@ -151,7 +195,7 @@ function shakeAt(pos, power) {
   G.shake = Math.max(G.shake, power * 3 * k * k);
 }
 
-const WEAPON_WORD = { gun: 'guns', msl: 'missile', crash: 'crashed', bounds: 'left the area' };
+const WEAPON_WORD = { gun: 'guns', msl: 'missile', crash: 'crashed', bounds: 'left the area', bomb: 'bomb', rkt: 'rockets' };
 function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) {
   const pl = e.plane;
   if (!pl.alive) return;
@@ -170,9 +214,10 @@ function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) 
   if (killer && killer !== e) feed(`${killer.name} ▸ ${vic} · ${WEAPON_WORD[cause] || cause}`, SIDE_COLORS[killer.side]);
   else feed(`${vic} ${cause === 'crash' ? 'crashed' : cause === 'bounds' ? 'was lost' : 'went down'}`, SIDE_COLORS[e.side]);
   if (e === G.mine) {
-    G.death = { handle, ang: Math.atan2(-pl.vel.z, -pl.vel.x) + 0.7, t: 0 };
+    G.death = { handle, ang: Math.atan2(-pl.vel.z, -pl.vel.x) + 0.7, t: 0, killer: killer && killer !== e ? killer : null, cause, at: pl.pos.clone() };
     G.camFocus.copy(pl.pos);
-    const by = killer && killer !== e ? `by ${killer.name} · ${jetOf(killer.plane.type).name}` : '';
+    const by = killer && killer !== e ? `by ${whoName(killer)}` : G.crashWhy || '';
+    G.crashWhy = null;
     hud.showBanner(cause === 'crash' ? 'CRASHED' : cause === 'bounds' ? 'LOST' : `SHOT DOWN — ${WEAPON_WORD[cause] || cause}`, by, '#ff6a5a', 3.5);
   } else if (killer && killer === G.mine) {
     hud.showBanner('SPLASH ONE', `${e.name} · ${jetOf(pl.type).name} destroyed`, '#9dffb8', 3);
@@ -181,12 +226,102 @@ function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) 
     const r = (v) => [v.x, v.y, v.z].map((x) => Math.round(x * 100) / 100);
     net.send({ t: 'dead', sl: e.id, c: cause, p: r(pl.pos), v: r(pl.vel), q: [pl.quat.x, pl.quat.y, pl.quat.z, pl.quat.w], sd: seed, by: killerId });
   }
+  pl.landed = null;
+  if (G.mission && isAuthority()) G.mission.onKill(e, killer);
+  if (e.local && G.scn.rules.respawn && G.scn.mode !== 'race') e.respawnT = G.scn.rules.respawnT;
+  if (hooksOut.kill) hooksOut.kill(e, killer, cause);
+}
+// Other modules (profile, recorder) listen to game events through these.
+const hooksOut = {};
+const rec = new Recorder();
+const profile = new Profile();
+profile.onMedal = (m) => { feed(`MEDAL: ${m.ic} ${m.name}`, '#ffd23f'); if (!(hud.banner && hud.banner.t > 0)) hud.showBanner('MEDAL EARNED', `${m.ic} ${m.name} — ${m.desc}`, '#ffd23f', 3); audio.beep(1760, 0.2, 0.12); };
+hooksOut.kill = (e, killer, cause) => {
+  const kp = killer ? (killer.unit ? killer.pos : killer.plane.pos) : null;
+  rec.event('kill', { victim: e.id, killer: killer ? killer.id : -1, cause, at: [e.plane.pos.x, e.plane.pos.z, e.plane.pos.y], from: kp ? [kp.x, kp.z, kp.y] : null });
+  if (!G.mine || G.mode == null) return;
+  if (killer === G.mine && e.side !== G.mine.side) profile.kill(cause);
+  if (e === G.mine) profile.died();
+};
+hooksOut.unitDead = (u, killer) => {
+  rec.event('unit', { unit: G.units.indexOf(u), killer: killer ? killer.id : -1, at: [u.pos.x, u.pos.z, u.base + Math.min(u.h, 20) * 0.5] });
+  if (killer && killer === G.mine && u.side !== G.mine.side) profile.groundKill(u.D);
+};
+hooksOut.trap = (wire) => profile.trap(wire);
+hooksOut.lesson = (L) => profile.lesson(L.key);
+hooksOut.raceFinish = (st) => { if (profile.race(G.scn.id, st.final)) { G.bestTime = fmtTime(st.final); flash('NEW BEST TIME!', 3); } };
+
+// ---------------- ground units ----------------
+function damageUnit(u, dmg, kind, by) {
+  if (!u.alive || !hot()) return;
+  u.hp -= dmg;
+  if (by >= 0) u.lastBy = by;
+  if (u.hp <= 0) destroyUnit(u, by);
+}
+function destroyUnit(u, by, remote) {
+  if (!u.alive) return;
+  u.deadPending = false;
+  u.alive = false; u.hp = 0; u.firing = false; u.lockTgt = null; u.radar.stt = false;
+  const killer = by >= 0 ? G.byId[by] : null;
+  const top = u.pos.clone().setY(u.base + Math.min(u.h, 20) * 0.5);
+  effects.explosion(top, u.vel, true);
+  if (u.D.big || u.D.ship) effects.fireball(top, u.vel, u.D.ship ? 1.6 : 1.2);
+  audio.explosion(top, true); shakeAt(top, 1.2);
+  if (killer && killer.side !== u.side) killer.groundKills = (killer.groundKills || 0) + 1;
+  feed(killer ? `${killer.name} ▸ ${u.name} destroyed` : `${u.name} destroyed`, SIDE_COLORS[killer ? killer.side : 1 - u.side]);
+  if (killer && killer === G.mine) hud.showBanner(u.D.ship ? 'SHIP SUNK' : 'TARGET DESTROYED', u.fullName, '#9dffb8', 2.5);
+  if (G.mission && isAuthority()) G.mission.onUnitDead(u, killer);
+  if (G.mode === 'online' && G.role === 'host' && !remote) net.send({ t: 'udead', id: u.id, by });
+  if (hooksOut.unitDead) hooksOut.unitDead(u, killer);
+}
+
+// Waves and reinforcements: new AI flights joining mid-round. The host builds them and tells
+// everyone; ids from 300 up so they never collide with scenario seats (0-15) or units (100+).
+function spawnGroup(w) {
+  const roster = [];
+  const hdg = w.hdg != null ? w.hdg : (Math.atan2(G.scn.sides[1 - w.side].x - w.x, -(G.scn.sides[1 - w.side].z - w.z)) * 180) / Math.PI;
+  const tmp = sanitize({ sides: [{ ...w, hdg, slots: w.slots }, { slots: [{}] }] });
+  const sp = spawnPoints(tmp, groundHeight)[0];
+  let lead = null;
+  w.slots.forEach((q, i) => {
+    const type = resolveJet(q.jet === 'choice' ? 'random' : q.jet, lead, null); if (i === 0) lead = type;
+    const loadout = pickLoadout(type, q.loadout, null);
+    roster.push({ id: G.spawnSeq++, side: w.side, idx: i, name: `${w.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member: null, human: false, spawned: true, route: q.route || null, p: [sp[i].pos.x, sp[i].pos.y, sp[i].pos.z], q: [sp[i].quat.x, sp[i].quat.y, sp[i].quat.z, sp[i].quat.w], sp: sp[i].speed });
+  });
+  if (G.mode === 'online') net.send({ t: 'spawn', r: roster, rd: G.round });
+  return roster.map(addSpawned);
+}
+function addSpawned(r) {
+  const e = makeEnt(r);
+  G.ents.push(e); G.byId[e.id] = e; G.sides[e.side].push(e);
+  const pl = e.plane, pos = new THREE.Vector3(...r.p), quat = new THREE.Quaternion(...r.q);
+  if (e.local) { pl.reset(pos, quat, r.sp, e.loadout); if (e.ai) e.ai.reset(); }
+  else { pl.alive = true; pl.pos.copy(pos); pl.prevPos.copy(pos); pl.quat.copy(quat); pl.vel.set(0, 0, -r.sp).applyQuaternion(quat); }
+  pl.contacts = new Map();
+  return e;
+}
+
+// Back into the fight after being shot down (score / survival rules): on a friendly carrier's
+// catapult if there is one, otherwise at the side's start.
+function respawnEnt(e) {
+  const pl = e.plane;
+  const sp = e.spawned ? null : spawnPoints(G.scn, groundHeight)[e.side][e.idx];
+  const s = G.scn.sides[e.side];
+  const pos = sp ? sp.pos : new THREE.Vector3(s.x, s.alt, s.z), quat = sp ? sp.quat : G.sides[e.side][0].plane.quat.clone();
+  pl.setType(e.type);
+  pl.reset(pos, quat, sp ? sp.speed : s.spd, e.loadout);
+  pl.contacts = new Map(); pl.tgt = null; pl.lockTgt = null; pl.wantStt = false; pl.podN = {};
+  const cv = G.units.find((u) => u.D.deck && u.alive && u.side === e.side);
+  if (cv) { land(pl, cv, { trap: false, along: 0, across: 0 }); pl.landed.phase = 'ready'; pl.landed.along = cv.D.deck.len / 2 - 105; pl.landed.across = -cv.D.deck.wid * 0.12; deckStep(pl, 0, null, false); }
+  e.handle = null; e.respawnT = 0;
+  if (e.ai) e.ai.reset();
+  if (e === G.mine) { G.death = null; G.spectate = null; input.reset(); G.camQuat.copy(pl.quat); hud.showBanner('BACK IN THE FIGHT', cv ? `On the ${cv.name}'s catapult` : '', '#9dffb8', 2); }
 }
 
 // ---------------- rounds ----------------
 function sendPhase() {
   if (G.mode !== 'online' || G.role !== 'host') return;
-  net.send({ t: 'phase', ph: G.phase, pt: G.phaseT, rw: G.rw, r: G.round, rt: G.roundT, k: G.ents.map((e) => [e.kills, e.deaths]) });
+  net.send({ t: 'phase', ph: G.phase, pt: G.phaseT, rw: G.rw, r: G.round, rt: G.roundT, k: G.ents.map((e) => [e.id, e.kills, e.deaths, e.groundKills || 0]), ms: G.mission ? G.mission.pack() : null });
 }
 function setPhase(ph, t = 0) {
   G.phase = ph; G.phaseT = t;
@@ -198,15 +333,28 @@ function startRound(r) {
   G.round = r;
   combat.clear(); effects.clear(); wrecks.clear();
   G.death = null; G.slowT = 0; G.shake = 0; G.spectate = null; G.roundT = 0;
+  // reinforcements from the last round leave; ground units are rebuilt
+  for (const e of G.ents) if (e.spawned && e.model) { scene.remove(e.model.group); e.model.dispose(); }
+  G.ents = G.ents.filter((e) => !e.spawned);
+  G.sides = [G.ents.filter((e) => e.side === 0), G.ents.filter((e) => e.side === 1)];
+  for (const k of Object.keys(G.byId)) if (+k >= 300) delete G.byId[k];
+  for (const u of G.units) u.reset();
+  if (G.mission) G.mission.reset();
+  if (G.race) G.race.reset();
   const sp = spawnPoints(G.scn, groundHeight);
+  G.radioMenu = false; G.ccip = null; G.ground = new Map();
+  G.lesson = G.scn.mode === 'training' && LESSONS[G.scn.lesson] ? new Lesson(G.scn.lesson) : null;
+  G.replay = null; G.freeCam = false;
+  { const b = profile.best(G.scn.id); G.bestTime = b ? fmtTime(b) : null; }
   for (const e of G.ents) {
+    e.respawnT = 0; e.racePrev = null;
     const s = sp[e.side][e.idx], pl = e.plane;
     e.lastHit = null; e.handle = null; pl.contacts = new Map();
     if (e.local) {
       pl.setType(e.type);
       pl.reset(s.pos, s.quat, s.speed, e.loadout);
-      pl.wantStt = false; pl.tgt = null; pl.lockTgt = null;
-      if (e.ai) e.ai.reset();
+      pl.wantStt = false; pl.tgt = null; pl.lockTgt = null; pl.podN = {}; pl.agt = null;
+      if (e.ai) { e.ai.command = null; e.ai.holdFire = false; e.ai.reset(); }
     } else {
       pl.hardReset(); pl.alive = true; pl.hp = 100;
       pl.pos.copy(s.pos); pl.prevPos.copy(s.pos); pl.quat.copy(s.quat);
@@ -220,7 +368,20 @@ function startRound(r) {
   const P = myPlane();
   if (P) G.camQuat.copy(P.quat);
   setPhase('countdown', 3);
+  rec.start(G.scn, G.ents, G.units, G.mine);
   hud.showBanner(`ROUND ${r}`, G.scn.name, '#ffffff', 2);
+}
+
+// The loadout a slot asks for, or the closest thing this jet has (an A/G mission asking for SEAD
+// gets a strike load on a jet without ARMs; an air mission asking for BVR gets the heavy load).
+const AG_FALLBACK = { sead: ['sead', 'strike', 'bombs', 'cas'], strike: ['strike', 'bombs', 'cas', 'sead'], cas: ['cas', 'bombs', 'strike'], bombs: ['bombs', 'strike', 'cas'], antiship: ['antiship', 'strike', 'bombs'] };
+function pickLoadout(type, want, choice) {
+  const L = JETS[type].loadouts;
+  if (want === 'bvr' && !L.bvr && L.heavy) want = 'heavy';
+  if (want && L[want]) return want;
+  if (want && AG_FALLBACK[want]) { const f = AG_FALLBACK[want].find((k) => L[k]); if (f) return f; }
+  if (choice && L[choice]) return choice;
+  return JETS[type].loadoutKeys[0];
 }
 
 // Turn a scenario + who sits where into a concrete roster (host / practice only; the roster
@@ -236,20 +397,76 @@ function buildRoster(scn, seats, choices, names) {
       const ch = human ? choices[member] || {} : {};
       const type = resolveJet(q.jet, lead, ch.jet);
       if (i === 0) lead = type;
-      const L = JETS[type].loadouts;
-      const want = q.loadout === 'bvr' && !L.bvr && L.heavy ? 'heavy' : q.loadout;
-      const loadout = want && L[want] ? want : human && ch.jet === type && L[ch.loadout] ? ch.loadout : JETS[type].loadoutKeys[0];
-      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member, human });
+      // time trials: only the human racers fly
+      if (scn.mode === 'race' && !human) return;
+      const loadout = pickLoadout(type, q.loadout, human && ch.jet === type ? ch.loadout : null);
+      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member, human, route: q.route || null, art: human ? (choices[member] || {}).art || null : null });
     });
   });
   return roster;
 }
 
+const missionApi = {
+  ents: () => G.ents, units: () => G.units, spawn: (w) => spawnGroup(w),
+  say: (text, color = '#ffe08a') => { feed(text, color); if (G.mode === 'online' && G.role === 'host') net.send({ t: 'feed', text, c: color }); },
+  banner: (text, sub = '', color = '#ffffff', dur = 3) => { hud.showBanner(text, sub, color, dur); if (G.mode === 'online' && G.role === 'host') net.send({ t: 'banner', text, sub, c: color, d: dur }); },
+  wake: () => { for (const u of G.units) u.awake = true; },
+};
+
+// Time-trial gates (rings) and map markers drawn in the world.
+const gateView = {
+  group: null, rings: [],
+  clear() { if (this.group) scene.remove(this.group); this.group = null; this.rings = []; },
+  build(scn) {
+    this.clear();
+    if (!scn.gates.length) return;
+    this.group = new THREE.Group();
+    const n = scn.gates.length;
+    scn.gates.forEach((g, i) => {
+      const [x, y, z, r] = g;
+      const nx = scn.gates[(i + 1) % n], pv = scn.gates[(i - 1 + n) % n];
+      const dir = new THREE.Vector3(nx[0] - pv[0], 0, nx[2] - pv[2]);
+      if (i === 0 && n > 1) dir.set(nx[0] - x, 0, nx[2] - z);
+      if (i === n - 1 && scn.laps === 1 && n > 1) dir.set(x - pv[0], 0, z - pv[2]);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(r, Math.max(2, r * 0.035), 8, 40), new THREE.MeshBasicMaterial({ color: 0xffb030, transparent: true, opacity: 0.85, fog: false }));
+      ring.position.set(x, y, z);
+      ring.lookAt(x + dir.x, y, z + dir.z);
+      this.group.add(ring); this.rings.push(ring);
+    });
+    scene.add(this.group);
+  },
+  update(next, finished) {
+    this.rings.forEach((r, i) => {
+      const on = !finished && i === next, done = finished || i < next;
+      r.material.color.setHex(on ? 0x40ff70 : done ? 0x707070 : 0xffb030);
+      r.material.opacity = done ? 0.25 : on ? 1 : 0.7;
+      r.scale.setScalar(on ? 1 + 0.03 * Math.sin(G.time * 6) : 1);
+    });
+  },
+};
+const MARK_COL = { wp: 0x7fe8ff, target: 0xff6a5a, danger: 0xffb030, info: 0xffffff, home: 0x9dffb8 };
+const markerView = {
+  group: null,
+  clear() { if (this.group) scene.remove(this.group); this.group = null; },
+  build(scn) {
+    this.clear();
+    if (!scn.markers.length) return;
+    this.group = new THREE.Group();
+    for (const m of scn.markers) {
+      const g = groundHeight(m.x, m.z);
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 1600, 6, 1, true), new THREE.MeshBasicMaterial({ color: MARK_COL[m.icon] || 0xffffff, transparent: true, opacity: 0.18, depthWrite: false, fog: false }));
+      beam.position.set(m.x, g + 800, m.z);
+      this.group.add(beam);
+    }
+    scene.add(this.group);
+  },
+};
+
 function makeEnt(r) {
   const local = r.human ? r.member === G.myId : isAuthority();
   const plane = local ? new Aircraft(r.name, r.type) : new RemotePlane(r.name);
   if (!local) { plane.setType(r.type); plane.gunAcc = 0; }
-  const e = { ...r, local, plane, ai: null, model: null, kills: 0, deaths: 0, lastHit: null, handle: null, aiIn: { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false }, aiOut: null };
+  const e = { ...r, local, plane, ai: null, model: null, kills: 0, deaths: 0, groundKills: 0, lastHit: null, handle: null, respawnT: 0, aiIn: { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false, gear: false, flaps: 0 }, aiOut: null };
   plane.ent = e; plane.side = r.side; plane.netId = G.netId + r.id;
   if (local && !r.human) e.ai = new AIPilot(plane, r.aic || r.skill);
   return e;
@@ -265,8 +482,22 @@ function startMatch(scn, roster, mode) {
   G.byId = {};
   for (const e of G.ents) G.byId[e.id] = e;
   G.sides = [G.ents.filter((e) => e.side === 0), G.ents.filter((e) => e.side === 1)];
+  // ground units and ships (same ids on every screen; the host simulates them)
+  G.units = G.scn.units.map((u, i) => { const x = new Unit(u, 100 + i); x.local = isAuthority(); x.netId = G.netId + 'u' + i; return x; });
+  G.stats = { rounds: 0, gunHits: 0, msl: 0, mslHits: 0, ag: 0, agHits: 0, traps: 0, perfectTraps: 0, airKills: 0, groundKills: 0, deaths: 0, flight: 0 };
+  for (const u of G.units) G.byId[u.id] = u;
+  combat.units = G.units;
+  unitView.clear(); unitView.sync(G.units);
+  G.surface = surfaceFn(G.units);
+  G.marked = new Set();
+  for (const o of G.scn.objectives) for (const i of o.units) if (G.units[i]) G.marked.add(G.units[i].id);
+  G.mission = new Mission(G.scn, missionApi);
+  G.race = G.scn.mode === 'race' || (G.scn.gates.length && G.scn.mode === 'training') ? new Race(G.scn) : null;
+  gateView.build(G.scn); markerView.build(G.scn); G.markPos = null;
+  G.spawnSeq = 300;
   G.mine = G.ents.find((e) => e.human && e.member === G.myId) || null;
-  G.rw = [0, 0]; G.round = 0; G.feed = []; G.paused = false;
+  G.rw = [0, 0]; G.round = 0; G.feed = []; G.paused = false; G.profiled = false;
+  if (G.mine) profile.missionStart();
   enterGame();
   if (isAuthority()) { startRound(1); sendPhase(); }
   else { G.phase = 'countdown'; G.phaseT = 3; }
@@ -274,20 +505,24 @@ function startMatch(scn, roster, mode) {
 
 function teardownMatch() {
   combat.clear(); wrecks.clear(); effects.clear();
+  unitView.clear(); G.units = []; combat.units = []; G.mission = null; G.race = null; G.surface = groundHeight;
+  G.replay = null; G.freeCam = false; G.lesson = null; $('replayBar').classList.remove('show');
+  gateView.clear(); markerView.clear();
   for (const e of G.ents) if (e.model) { scene.remove(e.model.group); e.model.dispose(); }
   G.ents = []; G.byId = {}; G.mine = null; G.sides = [[], []];
   G.death = null; G.slowT = 0; G.spectate = null;
 }
 
-function startPractice(scn) {
-  G.myId = 0; G.role = 'host'; G.hostId = 0;
+function startPractice(scn, skipBrief) {
   scn = sanitize(scn);
+  if (!skipBrief && (scn.briefing || scn.mode !== 'battle')) { showBriefing(scn, () => startPractice(scn, true)); return; }
+  G.myId = 0; G.role = 'host'; G.hostId = 0;
   // I take the first human seat (Blue first); every other seat is flown by the AI
   const seats = {};
   outer: for (let k = 0; k < 2; k++) for (let i = 0; i < scn.sides[k].slots.length; i++) {
     if (scn.sides[k].slots[i].pilot === 'human') { seats[k * MAX_PER_SIDE + i] = 0; break outer; }
   }
-  const roster = buildRoster(scn, seats, { 0: { jet: settings.jet, loadout: settings.loadout } }, { 0: settings.name });
+  const roster = buildRoster(scn, seats, { 0: myChoice() }, { 0: settings.name });
   G.lastPractice = scn;
   startMatch(scn, roster, 'ai');
   if (!G.mine) flash('No human seat in this scenario: spectating. Press N to switch aircraft.', 5);
@@ -314,14 +549,14 @@ net.on('room', (m) => {
   const wasHost = G.role === 'host';
   G.room = m; G.hostId = m.host; G.role = m.host === G.myId ? 'host' : 'guest';
   if (G.role === 'guest') {
-    net.send({ t: 'choice', to: G.hostId, jet: settings.jet, loadout: settings.loadout });
+    net.send({ t: 'choice', to: G.hostId, ...myChoice() });
     if (G.phase === 'menu') { if (m.quick) setLobby('Opponent found, starting…', false); else renderLobby(); }
     return;
   }
   // host: keep seats in sync with who is in the room
   if (!G.lobby || !wasHost) G.lobby = { scn: sanitize(findScenario(settings.scenario) || PRESETS[0]), seats: {}, choices: {}, started: false };
   if (m.quick) G.lobby.scn = quickScenario();
-  G.lobby.choices[G.myId] = { jet: settings.jet, loadout: settings.loadout };
+  G.lobby.choices[G.myId] = myChoice();
   reseat();
   if (G.mode === 'online') {
     // someone left mid-match: the host's AI takes over their jet
@@ -341,7 +576,7 @@ function quickScenario() {
 net.on('choice', (m) => {
   if (G.role !== 'host' || !G.lobby) return;
   const jet = JETS[m.jet] ? m.jet : DEFAULT_JET;
-  G.lobby.choices[m.from] = { jet, loadout: JETS[jet].loadouts[m.loadout] ? m.loadout : JETS[jet].loadoutKeys[0] };
+  G.lobby.choices[m.from] = { jet, loadout: JETS[jet].loadouts[m.loadout] ? m.loadout : JETS[jet].loadoutKeys[0], art: sanitizeArt(m.art) };
   broadcastLobby();
   if (G.phase === 'menu' && !G.room.quick) renderLobby();
   maybeQuickStart();
@@ -360,12 +595,17 @@ net.on('start', (m) => {
   G.lobby = G.lobby || { seats: {}, choices: {} };
   G.lobby.started = true;
   startMatch(m.scn, m.roster, 'online');
+  if (G.scn.briefing) showBriefing(G.scn, null);
 });
 net.on('phase', (m) => {
   if (G.mode !== 'online' || G.role !== 'guest') return;
   G.rw = m.rw; G.roundT = m.rt || 0;
-  if (m.k) m.k.forEach((kd, i) => { const e = G.ents[i]; if (e) { e.kills = kd[0]; e.deaths = kd[1]; } });
-  if (m.r !== G.round) { startRound(m.r); G.phaseT = m.pt; if (m.ph !== 'countdown') setPhase(m.ph, m.pt); return; }
+  const score = () => {
+    if (m.k) for (const kd of m.k) { const e = G.byId[kd[0]]; if (e && !e.unit) { e.kills = kd[1]; e.deaths = kd[2]; e.groundKills = kd[3] || 0; } }
+    if (m.ms && G.mission) G.mission.unpack(m.ms);
+  };
+  if (m.r !== G.round) { startRound(m.r); score(); G.phaseT = m.pt; if (m.ph !== 'countdown') setPhase(m.ph, m.pt); return; }
+  score();
   if (m.ph !== G.phase) setPhase(m.ph, m.pt);
   else G.phaseT = m.pt;
 });
@@ -381,7 +621,38 @@ net.on('S', (m) => { if (G.mode !== 'online') return; const now = performance.no
 net.on('hit', (m) => {
   if (G.mode !== 'online' || !hot()) return;
   const e = G.byId[m.sl];
-  if (e && e.local) applyDamage(e, m.d, m.k, m.by);
+  if (e && e.local) applyDamage(e, m.d, m.k, m.by, m.z || null);
+});
+// ground units: the host streams their state; guests mirror it
+net.on('U', (m) => {
+  if (G.mode !== 'online' || G.role !== 'guest' || m.r !== G.round) return;
+  const now = performance.now();
+  applyUnits(G.units, m.u, resolveSlot);
+  for (const u of G.units) if (u.deadPending) destroyUnit(u, u.lastBy ?? -1, true);
+  if (m.m) for (const x of m.m) { const u = G.byId[x[0]]; if (u && u.unit) combat.syncRemoteMissiles(x[1], now, u.id, resolveSlot); }
+});
+net.on('udead', (m) => {
+  if (G.mode !== 'online' || G.role !== 'guest') return;
+  const u = G.byId[m.id];
+  if (u && u.unit && u.alive) destroyUnit(u, m.by, true);
+});
+net.on('spawn', (m) => {
+  if (G.mode !== 'online' || G.role !== 'guest' || m.rd !== G.round) return;
+  for (const r of m.r) if (!G.byId[r.id]) addSpawned(r);
+});
+net.on('banner', (m) => { if (G.mode === 'online' && G.role === 'guest') hud.showBanner(String(m.text).slice(0, 60), String(m.sub || '').slice(0, 80), m.c, m.d); });
+// wingman orders from a guest flight lead: the host flies the AI, so it carries them out
+net.on('cmd', (m) => {
+  if (G.mode !== 'online' || G.role !== 'host') return;
+  const lead = G.byId[m.sl];
+  if (lead && !lead.unit && lead.member === m.from) issueCommand(lead, m.c, m.tg);
+});
+net.on('respawn', (m) => {
+  if (G.mode !== 'online') return;
+  const e = G.byId[m.sl];
+  if (!e || e.local || e.unit) return;
+  e.plane.alive = true; e.plane.hp = 100; e.handle = null;
+  if (m.p) { e.plane.pos.set(...m.p); e.plane.prevPos.copy(e.plane.pos); }
 });
 net.on('dead', (m) => {
   if (G.mode !== 'online') return;
@@ -471,12 +742,13 @@ function hostStart() {
   const names = {};
   for (const m of G.room.members) names[m.id] = m.name;
   names[G.myId] = settings.name;
-  L.choices[G.myId] = { jet: settings.jet, loadout: settings.loadout };
+  L.choices[G.myId] = myChoice();
   const roster = buildRoster(L.scn, L.seats, L.choices, names);
   L.started = true;
   broadcastLobby();
   net.send({ t: 'start', scn: L.scn, roster });
   startMatch(L.scn, roster, 'online');
+  if (G.scn.briefing) showBriefing(G.scn, null);
 }
 function hostBackToLobby() {
   if (G.role !== 'host') return;
@@ -511,7 +783,7 @@ function handleWeapons(e, ctl, target, dt, isLocalHuman) {
   const on = hot();
   plane.missileCd -= dt; plane.flareCd -= dt; plane.chaffCd = (plane.chaffCd || 0) - dt;
   const gun = plane.gunT;
-  const trigger = on && plane.alive && ctl.gun && plane.gunAmmo > 0 && gun.rate > 0;
+  const trigger = on && plane.alive && !plane.landed && ctl.gun && plane.gunAmmo > 0 && gun.rate > 0;
   plane.gunSpin = trigger ? Math.min(1, plane.gunSpin + dt / Math.max(0.01, gun.spinUp)) : Math.max(0, plane.gunSpin - dt / 0.5);
   plane.firing = trigger;
   if (trigger) {
@@ -520,13 +792,16 @@ function handleWeapons(e, ctl, target, dt, isLocalHuman) {
     let n = 0;
     while (plane.gunAcc >= 1 && plane.gunAmmo > 0) {
       plane.gunAcc -= 1; plane.gunAmmo--;
+      if (isLocalHuman && G.stats) G.stats.rounds++;
       combat.fireBullet(plane, true, (n++ / (dt * rate + 1)) * dt);
     }
     if (plane.gunSpin > 0.2) effects.muzzle(combat.gunMuzzle(plane), plane.vel);
   } else plane.gunAcc = 0;
 
   if (!on || !plane.alive) return;
-  if (ctl.missile && plane.missileCd <= 0) {
+  if (plane.weapon === 'ag') { if (ctl.missile && plane.missileCd <= 0) { if (plane.landed) { if (isLocalHuman) flash('ON DECK — weapons safe'); } else fireAg(e, isLocalHuman); } }
+  else if (ctl.missile && plane.missileCd <= 0 && plane.landed) { if (isLocalHuman) flash('ON DECK — weapons safe'); }
+  else if (ctl.missile && plane.missileCd <= 0) {
     const cls = plane.weapon;
     const key = firstOf(plane.stores, cls);
     const w = key && WEAPONS[key];
@@ -540,6 +815,7 @@ function handleWeapons(e, ctl, target, dt, isLocalHuman) {
       plane.stores[st] = null; plane.updateStores(); plane.lastSide = st % 2;
       combat.launchMissile(plane, target, key, st);
       plane.missileCd = 0.8;
+      if (isLocalHuman && G.stats) G.stats.msl++;
       if (cls === 'srm') plane.lockProgress = 0.6;
       audio.launch(isLocalHuman ? null : plane.pos);
       if (isLocalHuman) flash(w.guidance === 'sarh' ? `FOX 1 — ${w.name}: hold the lock until impact` : cls === 'mrm' ? (plane.radar.stt ? `FOX 3 — ${w.name}, keep the lock for datalink` : `FOX 3 — ${w.name}, no lock, no datalink`) : `FOX 2 — ${w.name}`, 1.8);
@@ -559,6 +835,116 @@ function handleWeapons(e, ctl, target, dt, isLocalHuman) {
   }
 }
 
+// Bombs, rockets and A/G missiles. Brevity calls: PICKLE (bombs), RIFLE (TV/IR missile),
+// MAGNUM (anti-radiation), BRUISER (anti-ship).
+const AG_CALL = { bomb: 'PICKLE — bombs away', gbomb: 'PICKLE — guided bomb away', agm: 'RIFLE', arm: 'MAGNUM', ashm: 'BRUISER', rkt: 'ROCKETS' };
+function fireAg(e, isLocalHuman) {
+  const pl = e.plane, key = pl.agKey, w = key && WEAPONS[key];
+  if (!w || !countKey(pl.stores, key)) { if (isLocalHuman) flash('NO A/G STORES LEFT'); return; }
+  const known = isLocalHuman ? G.ground : new Map(pl.agt ? [[pl.agt, { how: 'eyes' }]] : []);
+  const chk = releaseCheck(pl, key, pl.agt, known);
+  if (!chk.ok) { if (isLocalHuman) flash(chk.why, 1.6); pl.missileCd = 0.3; return; }
+  const st = stationOf(pl.stores, key, pl.lastSide, pl.T.fireOrder);
+  if (st < 0) return;
+  pl.lastSide = st % 2;
+  if (w.cls === 'rkt') {
+    // rocket pods ripple their rockets; the pod is gone once it's empty
+    pl.podN = pl.podN || {};
+    pl.podN[st] = (pl.podN[st] || 0) + 1;
+    if (pl.podN[st] >= w.shots) { pl.stores[st] = null; pl.updateStores(); delete pl.podN[st]; }
+    combat.launchMissile(pl, chk.target, key, st);
+    pl.missileCd = 0.08;
+    if (G.stats && isLocalHuman) G.stats.ag++;
+    if (isLocalHuman && !(G.rktCallT > G.time)) { flash(AG_CALL.rkt, 0.8); G.rktCallT = G.time + 1; }
+    audio.launch(isLocalHuman ? null : pl.pos);
+    return;
+  }
+  pl.stores[st] = null; pl.updateStores();
+  const m = combat.launchMissile(pl, chk.target, key, st);
+  // a GPS bomb with nothing designated goes where the CCIP pipper says
+  if (m && !chk.target && isLocalHuman && G.ccip) m.est.copy(G.ccip.pos);
+  pl.missileCd = w.cls === 'bomb' ? 0.22 : 0.8;
+  if (w.cls === 'agm') { pl.agLock = 0; pl.agLocked = false; }
+  if (G.stats && isLocalHuman) G.stats.ag++;
+  if (w.cls !== 'bomb' && w.cls !== 'gbomb') audio.launch(isLocalHuman ? null : pl.pos);
+  if (isLocalHuman) flash(`${AG_CALL[w.cls]} — ${w.name}${chk.why ? ` (${chk.why.split(' — ')[0].toLowerCase()})` : chk.target ? ` → ${chk.target.name}` : ''}`, 1.8);
+}
+
+// Time trial: over when every human racer has finished or crashed out.
+function raceResult(timeUp) {
+  const racers = G.ents.filter((e) => e.human);
+  if (!racers.length) return timeUp ? { win: -1, title: 'TIME UP', why: '' } : null;
+  const R = G.race;
+  const over = racers.every((e) => R.of(e).done || (!e.plane.alive && !(e.respawnT > 0)));
+  if (!over && !timeUp) return null;
+  const fin = racers.filter((e) => R.of(e).done).sort((a, b) => R.of(a).final - R.of(b).final);
+  if (!fin.length) return { win: 1, title: 'DID NOT FINISH', why: timeUp ? 'Time is up' : 'Crashed out of the course' };
+  const best = fin[0], st = R.of(best);
+  return { win: best.side, title: racers.length > 1 ? `${best.name.toUpperCase()} WINS` : 'COURSE COMPLETE', why: `${fmtTime(st.final)}${st.pen > 0 ? ` incl. ${st.pen.toFixed(1)} s penalty` : ''}`, times: fin.map((e) => [e.name, R.of(e).final]) };
+}
+
+function carrierOf(side) { return G.units.find((u) => u.D.deck && u.alive && u.side === side) || null; }
+function fmtTime(t) { const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`; }
+
+// Carrier deck events for a local jet.
+function deckEvent(e, ev) {
+  const me = e === G.mine, pl = e.plane, cv = pl.landed ? pl.landed.u : null;
+  switch (ev) {
+    case 'trap':
+      if (me) {
+        const wire = Math.max(1, Math.min(4, Math.ceil((pl.landed.along + cv.D.deck.len / 2 - 15) / 20)));
+        hud.showBanner('TRAP!', `Caught the ${['1', '2', '3', '4'][wire - 1]}-wire${wire === 3 ? ' — perfect' : ''}`, '#9dffb8', 2.5);
+        audio.beep(520, 0.2, 0.16);
+        if (G.stats) { G.stats.traps++; if (wire === 3) G.stats.perfectTraps = (G.stats.perfectTraps || 0) + 1; }
+        if (hooksOut.trap) hooksOut.trap(wire);
+      }
+      break;
+    case 'touch': if (me) flash('NO WIRE — BOLTER! Full power (R) to go around', 2.5); break;
+    case 'stopped': if (me) flash('On deck — the crew is rearming and repairing you', 2.5); break;
+    case 'rearmed':
+      if (me) { flash('REARMED, REFUELLED & REPAIRED — throttle to full power (R) to launch', 3); audio.beep(880, 0.15, 0.12); }
+      break;
+    case 'launch':
+      if (me) flash('CAT SHOT! Gear up (J)', 2);
+      if (e.ai) e.ai.relaunched();
+      if (me) input.gear = true;
+      break;
+    case 'bolter': if (me) flash('BOLTER — airborne again, come around and try again', 2.5); break;
+    case 'overboard': if (me) G.crashWhy = 'Went off the end of the deck too slow'; killPlane(e, 'crash'); break;
+  }
+}
+
+// ---------------- wingman radio ----------------
+const RADIO = [['attack', 'Attack my target'], ['cover', 'Cover me'], ['rejoin', 'Rejoin on me'], ['ground', 'Attack ground targets'], ['rtb', 'Return to base / rearm'], ['hold', 'Weapons hold'], ['free', 'Weapons free']];
+function radioMenu(me) {
+  const d = input.digit();
+  if (!d) return;
+  G.radioMenu = false;
+  const c = RADIO[d - 1];
+  if (!c) return;
+  const P = me.plane;
+  const tg = c[0] === 'attack' ? P.tgt : c[0] === 'ground' ? P.agt : null;
+  const tgId = tg && tg.ent ? tg.ent.id : -1;
+  flash(`${me.name}: "${c[1]}"`, 1.5);
+  if (G.mode === 'online' && G.role !== 'host') net.send({ t: 'cmd', to: G.hostId, sl: me.id, c: c[0], tg: tgId });
+  else issueCommand(me, c[0], tgId);
+}
+function issueCommand(lead, c, tgId) {
+  const tgt = tgId >= 0 ? resolveSlot(tgId) : null;
+  const wing = G.ents.filter((e) => e.ai && e.side === lead.side && e.plane.alive && e !== lead);
+  if (!wing.length) { if (lead === G.mine) flash('No AI wingmen on your side', 1.5); return; }
+  for (const e of wing) e.ai.order(c, lead.plane, tgt);
+  const nm = tgt ? (tgt.unit ? tgt.name : tgt.ent ? tgt.ent.name : 'the bandit') : null;
+  const reply = {
+    attack: nm ? `Copy, engaging ${nm}.` : 'Copy, engaging. (Designate a target for us first next time.)',
+    cover: "Copy, I've got your six.", rejoin: 'Rejoining on you.',
+    ground: nm ? `Copy, rolling in on ${nm}.` : 'Copy, hitting ground targets.',
+    rtb: carrierOf(lead.side) ? 'Copy, returning to the boat.' : 'Copy, RTB.',
+    hold: 'Weapons hold, copy.', free: 'Weapons free, copy.',
+  }[c];
+  radio(wing[0], `${reply}${wing.length > 1 ? ` (${wing.length} aircraft)` : ''}`);
+}
+
 function setTarget(pl, t) {
   if (pl.tgt === t) return;
   pl.tgt = t;
@@ -569,11 +955,11 @@ function setTarget(pl, t) {
 
 // Player target designation: automatic (nearest to the nose) unless held by a lock or picked with N.
 const _tv = new THREE.Vector3();
-function playerTargeting(P, picture, dt) {
+function playerTargeting(P, picture, dt, groundMode) {
   G.tgtT -= dt; G.tgtManualT -= dt;
   const known = [...picture.keys()].filter((e) => e.alive);
   const offBore = (e) => { const c = picture.get(e); return Math.acos(Math.max(-1, Math.min(1, _tv.copy(c.pos).sub(P.pos).normalize().dot(P.fwd)))); };
-  if (input.tapped('cycle') && known.length) {
+  if (!groundMode && input.tapped('cycle') && known.length) {
     known.sort((a, b) => offBore(a) - offBore(b));
     const i = known.indexOf(P.tgt);
     const next = known[(i + 1) % known.length];
@@ -607,8 +993,10 @@ function spectateCandidates() {
 }
 
 function updateCamera(dt) {
-  if (G.freeCam) return;
   const P = myPlane();
+  if (G.freeCam && P && P.alive && !G.replay) G.freeCam = false;
+  if (G.freeCam) { freeCamUpdate(dt); return; }
+  if (G.replay) { replayCamera(dt); return; }
   if (G.phase === 'menu') {
     G.attract += dt * 0.03;
     camera.position.set(Math.cos(G.attract) * 9000, 3200, Math.sin(G.attract) * 9000);
@@ -619,6 +1007,20 @@ function updateCamera(dt) {
     // death camera: ride along with the falling wreck, then find the parachute
     const D = G.death, h = D.handle, pl = h.pilot;
     D.t += dt;
+    // kill cam: after the first moments, look at the wreck from behind whoever shot you down
+    const K = D.killer, kp = K ? (K.unit ? (K.alive ? K.pos : null) : K.plane.alive ? K.plane.pos : null) : null;
+    if (kp && D.t > 2.2 && D.t < 6.5) {
+      const tgt = h.main ? h.main.pos : D.at;
+      _off.subVectors(tgt, kp); const dist = _off.length(); _off.normalize();
+      const back = K.unit ? 60 : 38;
+      camera.position.copy(kp).addScaledVector(_off, -back); camera.position.y += K.unit ? 25 : 9;
+      const gh = groundHeight(camera.position.x, camera.position.z) + 4;
+      if (camera.position.y < gh) camera.position.y = gh;
+      camera.up.set(0, 1, 0); camera.lookAt(dist > 4000 ? _wt.copy(kp).addScaledVector(_off, 4000) : tgt);
+      D.kill = `KILL CAM — ${whoName(K)} · ${(dist / 1000).toFixed(1)} km`;
+      return;
+    }
+    D.kill = null;
     const onPilot = pl && pl.state !== 'wait' && h.t > h.ejectAt + 1.1;
     const target = onPilot ? pl.pos : h.main ? h.main.pos : G.camFocus;
     G.camFocus.lerp(target, 1 - Math.exp(-dt * (onPilot ? 2.2 : 7)));
@@ -708,9 +1110,12 @@ function frame(now) {
   requestAnimationFrame(frame);
   let dt = (now - last) / 1000; last = now;
   if (dt > 0.05) dt = 0.05;
+  if (!(dt >= 0)) dt = 0;
   G.time += dt;
 
-  if (input.tapped('pause') && G.mode) togglePause();
+  if (input.tapped('pause') && G.replay) stopReplay();
+  else if (input.tapped('pause') && G.mode) togglePause();
+  if (input.tapped('freeCam') && G.mode && (G.replay || !myPlane() || !myPlane().alive)) toggleFreeCam();
   if (input.tapped('help') && G.mode) $('help').classList.toggle('show');
   if (input.tapped('camera')) G.camMode = G.camMode === 'chase' ? 'cockpit' : 'chase';
   if (input.tapped('padlock')) { G.padlock = !G.padlock; flash(G.padlock ? 'PADLOCK / HELMET CUE ON' : 'PADLOCK OFF', 1); }
@@ -727,7 +1132,8 @@ function frame(now) {
   } else G.timeScale = 1;
   const sdt = dt * G.timeScale;
 
-  if (simRunning) step(sdt, now);
+  if (G.replay) replayStep(dt);
+  else if (simRunning) step(sdt, now);
 
   updateCamera(dt);
   if (G.shake > 0.01) {
@@ -738,9 +1144,10 @@ function frame(now) {
   world.update(camera, dt);
   effects.update(simRunning ? sdt : 0);
   wrecks.update(simRunning ? sdt : 0);
+  if (inGame) unitView.update(simRunning ? sdt : 0, G.time);
   if (inGame) for (const e of G.ents) planeEffects(e, sdt);
 
-  drawHud(dt);
+  if (!G.noRender) { if (G.replay) { hud.draw({ active: false }, dt); updateReplayBar(); } else drawHud(dt); }
   audio.listenerPos = camera.position;
   audio.listenerQuat = camera.quaternion;
   audio.listenerVel = P && P.alive ? P.vel : null;
@@ -757,13 +1164,13 @@ function frame(now) {
   audio.update(dt, {
     rwr: T ? { search: T.search, lock: T.lock, launch: T.launch, active: T.active, maws: T.maws } : null,
     mrmTrack: A.weapon === 'mrm' && A.radar.stt,
-    active: inGame && !(G.paused && G.mode === 'ai'), alive: A.alive, eng: A.eng, speed: A.speed, g: A.g,
+    active: inGame && !G.replay && !(G.paused && G.mode === 'ai'), alive: A.alive, eng: A.eng, speed: A.speed, g: A.g,
     firing: A.firing, locked: A.locked, inCone: A.inCone, lockProgress: A.lockProgress, threatDist: T ? T.nearest : 1e9, cockpit: G.camMode === 'cockpit',
     alpha: A.alpha, airbrake: A.airbrake, gloc: A.gloc, pullUp: inGame && G.pullUp,
     opp: near,
   });
 
-  renderer.render(scene, camera);
+  if (!G.noRender) renderer.render(scene, camera);
   input.endFrame();
 }
 
@@ -789,15 +1196,19 @@ function step(dt, now) {
     if (G.phaseSendT <= 0) { G.phaseSendT = 1; sendPhase(); }
     if (G.phase === 'countdown' && G.phaseT <= 0) { setPhase('fight'); sendPhase(); }
     else if (G.phase === 'fight') {
-      const alive = [0, 1].map((k) => G.sides[k].filter((e) => e.plane.alive).length);
+      G.mission.update(dt);
+      const alive = [0, 1].map((k) => G.sides[k].filter((e) => e.plane.alive || e.respawnT > 0).length);
       const timeUp = G.scn.timeLimit > 0 && G.roundT >= G.scn.timeLimit * 60;
-      if (alive[0] === 0 || alive[1] === 0 || timeUp) {
-        let win = -1;
-        if (alive[0] > 0 && alive[1] === 0) win = 0; else if (alive[1] > 0 && alive[0] === 0) win = 1;
-        else if (timeUp && alive[0] !== alive[1]) win = alive[0] > alive[1] ? 0 : 1;
+      const res = G.race ? raceResult(timeUp) : G.scn.mode === 'training' ? (G.lesson && G.lesson.finished && G.lesson.doneFlash <= 0.2 ? { win: 0, why: 'Lesson complete', lesson: true } : null) : G.mission.check(alive, timeUp);
+      if (res) {
+        const win = res.win;
         if (win >= 0) G.rw[win]++;
         const sd = G.scn.sides;
-        hud.showBanner(win < 0 ? 'ROUND DRAWN' : `${sd[win].name.toUpperCase()} WINS THE ROUND`, timeUp ? 'Time is up' : '', win < 0 ? '#ffffff' : SIDE_COLORS[win], 3);
+        const title = G.race ? res.title : res.lesson ? 'LESSON COMPLETE' : G.scn.mode === 'survival' ? (win === 0 ? 'SURVIVED!' : 'MISSION FAILED') : win < 0 ? 'ROUND DRAWN' : `${sd[win].name.toUpperCase()} WINS THE ROUND`;
+        hud.showBanner(title, res.why || (timeUp ? 'Time is up' : ''), win < 0 ? '#ffffff' : SIDE_COLORS[win], 3.5);
+        if (G.mode === 'online') net.send({ t: 'banner', text: title, sub: res.why || '', c: win < 0 ? '#ffffff' : SIDE_COLORS[win], d: 3.5 });
+        G.lastResult = res;
+        if (hooksOut.roundEnd) hooksOut.roundEnd(res);
         setPhase('roundEnd', 7.5); sendPhase();
       }
     } else if (G.phase === 'roundEnd' && G.phaseT <= 0) {
@@ -811,6 +1222,41 @@ function step(dt, now) {
   const sidePlanes = [G.sides[0].map((e) => e.plane), G.sides[1].map((e) => e.plane)];
   const all = G.ents.map((e) => e.plane);
   const enemyMsl = [combat.enemyMissiles(0), combat.enemyMissiles(1)];
+  // ground units: what each side can attack, and the radars each side's RWR can hear
+  const enemyUnits = [G.units.filter((u) => u.side === 1 && u.alive), G.units.filter((u) => u.side === 0 && u.alive)];
+  const emitters = [[...sidePlanes[1], ...enemyUnits[0].filter((u) => u.radarT)], [...sidePlanes[0], ...enemyUnits[1].filter((u) => u.radarT)]];
+
+  // ---- ground units and ships (host / practice) ----
+  if (isAuthority() && G.units.length) {
+    G.wakeT -= dt;
+    if (G.wakeT <= 0) {
+      // early-warning radars cue their side's ambush SAM sites
+      G.wakeT = 1;
+      for (const k of [0, 1]) G.wake[k] = G.units.some((u) => u.alive && u.D.ewr && u.side === k && u.radarMode > 0 && sidePlanes[1 - k].some((p) => p.alive && u.canSee(p.pos)));
+    }
+    for (const u of G.units) {
+      if (!hot()) { u.prevPos.copy(u.pos); continue; }
+      u.update(dt, { enemies: sidePlanes[1 - u.side], combat, wake: G.wake[u.side], say: (t) => missionApi.say(t, SIDE_COLORS[u.side]), onLaunch: (x, m) => { audio.launch(x.pos); } });
+    }
+  } else if (G.units.length) {
+    // guests: tracers from AAA and ship guns are visual only (the host detects the hits)
+    for (const u of G.units) {
+      if (!u.alive || !u.firing || !u.gunT) continue;
+      if (u.lockTgt) { u.fwd.copy(u.lockTgt.pos).sub(u.pos).normalize(); u.right.crossVectors(u.fwd, _tv.set(0, 1, 0)).normalize(); u.up.crossVectors(u.right, u.fwd); }
+      u.gunAcc = (u.gunAcc || 0) + dt * u.gunT.rate;
+      while (u.gunAcc >= 1) { u.gunAcc -= 1; combat.fireBullet(u, false); }
+    }
+  }
+
+  // ---- back into the fight (respawn rules) ----
+  for (const e of G.ents) {
+    if (!e.local || e.plane.alive || !(e.respawnT > 0)) continue;
+    e.respawnT -= dt;
+    if (e.respawnT <= 0 && hot()) {
+      respawnEnt(e);
+      if (G.mode === 'online') { const p = e.plane.pos; net.send({ t: 'respawn', sl: e.id, p: [p.x, p.y, p.z] }); }
+    }
+  }
 
   // ---- decisions ----
   const pin = input.flight(dt);
@@ -823,13 +1269,14 @@ function step(dt, now) {
     scanContacts(pl, enemies, dt);
     const picture = datalinkPicture(pl, friends);
     const lead = G.sides[e.side].find((x) => x.plane.alive);
-    const ctx = { friends, enemies, picture, home: sideHome(1 - e.side), base: sideStart(e.side), anchor: sideStart(e.side), lead: lead && lead.plane, idx: e.idx, say: (t) => radio(e, t) };
+    const ctx = { friends, enemies, picture, home: sideHome(1 - e.side), base: sideStart(e.side), anchor: sideStart(e.side), lead: lead && lead.plane, idx: e.idx, say: (t) => radio(e, t),
+      route: e.route, ground: enemyUnits[e.side], priority: G.marked, carrier: carrierOf(e.side) };
     setTarget(pl, e.ai.pickTarget(enemies, picture, ctx));
-    const threat = assessThreatsMulti(pl, enemies, enemyMsl[e.side]);
+    const threat = assessThreatsMulti(pl, emitters[e.side], enemyMsl[e.side]);
     const out = e.ai.update(dt, pl.tgt, combat, threat, ctx);
     e.aiOut = out;
     const a = e.aiIn;
-    a.pitch = out.pitch; a.roll = out.roll; a.yaw = out.yaw; a.throttle = out.throttle; a.airbrake = out.airbrake;
+    a.pitch = out.pitch; a.roll = out.roll; a.yaw = out.yaw; a.throttle = out.throttle; a.airbrake = out.airbrake; a.gear = out.gear; a.flaps = out.flaps;
   }
 
   // ---- physics ----
@@ -838,15 +1285,56 @@ function step(dt, now) {
     acc -= PHYS_DT;
     for (const e of G.ents) {
       if (!e.local || !e.plane.alive) continue;
-      if (e.plane.step(PHYS_DT, e === me ? pin : e.aiIn, groundHeight) === 'crash') killPlane(e, 'crash');
+      const pl = e.plane, inp = e === me ? pin : e.aiIn;
+      if (pl.landed) { const ev = deckStep(pl, PHYS_DT, inp, !!e.ai); if (ev) deckEvent(e, ev); continue; }
+      if (pl.step(PHYS_DT, inp, G.surface) === 'crash') {
+        const cv = G.units.find((u) => u.D.deck && u.alive && u.onDeck(pl.pos) && pl.pos.y > u.base + u.D.deck.y - 6);
+        if (cv) {
+          const r = tryLand(pl, cv);
+          if (r.ok) { land(pl, cv, r); deckEvent(e, r.trap ? 'trap' : 'touch'); continue; }
+          if (e === me) G.crashWhy = r.why;
+        }
+        killPlane(e, 'crash');
+        continue;
+      }
+      // AI on short final: its trap is assisted
+      if (e.ai && e.aiOut && e.aiOut.land) {
+        const cv = carrierOf(e.side);
+        if (cv && cv.onDeck(pl.pos)) {
+          const q = cv.toDeck(pl.pos), D = cv.D.deck;
+          land(pl, cv, { trap: true, along: Math.max(q.along, -D.len / 2 + 30), across: Math.max(-8, Math.min(8, q.across)) });
+          deckEvent(e, 'trap');
+        }
+      }
     }
   }
   for (const e of G.ents) { if (e.local) e.plane.updateAxes(); else e.plane.update(now, dt); }
+
+  // ---- time trial gates ----
+  if (G.race && hot()) {
+    for (const e of G.ents) {
+      if (!e.human) continue;
+      const pl = e.plane;
+      e.racePrev = e.racePrev || pl.pos.clone();
+      const ev = G.race.update(e, dt, e.racePrev);
+      e.racePrev.copy(pl.pos);
+      if (!ev || e !== me) continue;
+      const st = G.race.of(e);
+      if (ev === 'finish') { hud.showBanner('FINISHED', `${fmtTime(st.final)}${st.pen > 0 ? ` (incl. ${st.pen.toFixed(1)} s penalty)` : ''}`, '#9dffb8', 4); audio.beep(1320, 0.4, 0.15); if (hooksOut.raceFinish) hooksOut.raceFinish(st); }
+      else { audio.beep(ev === 'lap' ? 1100 : 990, 0.12, 0.12); flash(ev === 'lap' ? `LAP ${st.lap}/${G.scn.laps} · ${fmtTime(st.t + st.pen)}` : `GATE ${st.next}/${G.race.gates.length} · ${fmtTime(st.t + st.pen)}`, 1.2); }
+    }
+    const P0 = myPlane();
+    if (P0) { const st = G.race.of(G.mine); gateView.update(st.next, st.done); }
+  }
+
+  // ---- gear overspeed: the gear doors blow off the flaps / gear get sucked up ----
+  if (P && P.alive && !P.landed && P.gear && P.speed > GEAR_VMAX + 15) { input.gear = false; flash('GEAR UP — overspeed', 1.5); }
 
   // ---- arena boundary (local jets) ----
   for (const e of G.ents) {
     const pl = e.plane;
     if (!e.local || !pl.alive) continue;
+    if (pl.landed) { pl.outOfBounds = 0; continue; }
     if (Math.hypot(pl.pos.x, pl.pos.z) > ARENA_RADIUS || pl.pos.y > 16000) {
       pl.outOfBounds += dt;
       if (pl.outOfBounds > 10) applyDamage(e, 25 * dt, 'bounds');
@@ -861,8 +1349,20 @@ function step(dt, now) {
     for (const f of friends) if (f !== P && !(f.ent && f.ent.ai)) scanContacts(f, enemies, dt);
     scanContacts(P, enemies, dt);
     picture = datalinkPicture(P, friends);
-    if (P.alive && !G.paused) {
-      playerTargeting(P, picture, dt);
+    if (input.tapped('radio') && P.alive && !G.paused) { G.radioMenu = !G.radioMenu; if (G.radioMenu) audio.beep(1500, 0.05, 0.08); }
+    else if (P.alive && !G.paused && G.radioMenu) radioMenu(me);
+    else if (P.alive && !G.paused) {
+      playerTargeting(P, picture, dt, P.weapon === 'ag');
+      if (input.tapped('selAg')) {
+        const kinds = agKinds(P.stores);
+        if (!kinds.length) flash(JETS[P.type].loadouts.strike || JETS[P.type].loadouts.cas ? 'NO A/G STORES — pick a strike loadout in the hangar' : 'NO A/G STORES', 1.6);
+        else {
+          const i = P.weapon === 'ag' ? kinds.indexOf(P.agKey) : -1;
+          P.weapon = 'ag'; P.agKey = kinds[(i + 1) % kinds.length]; P.agLock = 0; P.agLocked = false;
+          const w = WEAPONS[P.agKey];
+          flash(`${AG_LABEL[w.cls] || 'A/G'} — ${w.name} ×${countKey(P.stores, P.agKey)}${kinds.length > 1 ? '  (3: next store)' : ''}`, 1.6);
+        }
+      }
       if (input.tapped('selSrm')) { P.weapon = 'srm'; flash(countOf(P.stores, 'srm') ? `SRM — ${WEAPONS[firstOf(P.stores, 'srm')].name}` : 'SRM — none left', 1.2); }
       if (input.tapped('selMrm')) {
         if (countOf(P.stores, 'mrm')) { P.weapon = 'mrm'; flash(`MRM — ${WEAPONS[firstOf(P.stores, 'mrm')].name}`, 1.2); }
@@ -883,13 +1383,29 @@ function step(dt, now) {
     const eyes = !!(tc && tc.eyes);
     const srmKey = P.weapon === 'srm' ? firstOf(P.stores, 'srm') : null;
     updateIrLock(P, P.tgt, dt, srmKey, (G.padlock && eyes && P.T.hmd) || P.radar.stt || P.irst.fresh);
-    handleWeapons(me, { gun: input.held('gun'), missile: input.tapped('missile'), flare: input.held('flare'), chaff: input.held('chaff') }, P.tgt, dt, true);
-    G.threat = assessThreatsMulti(P, enemies, enemyMsl[me.side]);
+    // air-to-ground: what I know is down there, the designated target and the seeker
+    if (P.weapon === 'ag' && (!P.agKey || !countKey(P.stores, P.agKey))) {
+      const kinds = agKinds(P.stores);
+      if (kinds.length) P.agKey = kinds[0]; else { P.weapon = countOf(P.stores, 'srm') ? 'srm' : 'mrm'; P.agKey = null; flash('A/G STORES EXPENDED', 1.5); }
+    }
+    G.groundT -= dt;
+    if (G.groundT <= 0) { G.groundT = 0.5; G.ground = scanGround(P, G.units, G.marked); }
+    if (P.weapon === 'ag' && P.alive) {
+      const w = WEAPONS[P.agKey];
+      const ok = w.cls === 'ashm' ? (u) => u.D.ship : w.cls === 'arm' ? (u) => !!u.radarT : null;
+      const cyc = input.tapped('cycle') && !G.radioMenu;
+      P.agt = pickGround(P, G.ground, P.agt, cyc, ok);
+      if (cyc) flash(P.agt ? `GROUND TARGET — ${P.agt.name} (${P.agt.fullName})` : 'NO GROUND TARGETS KNOWN', 1.4);
+      updateAgLock(P, P.agKey, P.agt, dt);
+      G.ccip = w.cls === 'bomb' || w.cls === 'rkt' || w.cls === 'gbomb' ? impactPoint(P, P.agKey, G.ccipV || (G.ccipV = new THREE.Vector3())) : null;
+    } else { P.agLock = 0; P.agLocked = false; G.ccip = null; }
+    handleWeapons(me, { gun: input.held('gun'), missile: input.tapped('missile') || (P.weapon === 'ag' && WEAPONS[P.agKey] && WEAPONS[P.agKey].cls === 'rkt' && input.held('missile')), flare: input.held('flare'), chaff: input.held('chaff') }, P.tgt, dt, true);
+    G.threat = assessThreatsMulti(P, emitters[me.side], enemyMsl[me.side]);
     // launch zone for the selected missile against the designated target
     G.dlzT -= dt;
     if (G.dlzT <= 0) {
       G.dlzT = 0.25;
-      const key = firstOf(P.stores, P.weapon), O = P.tgt;
+      const key = P.weapon === 'ag' ? null : firstOf(P.stores, P.weapon), O = P.tgt;
       if (key && O && O.alive && P.alive) {
         const rel = _tv.copy(O.pos).sub(P.pos), d = rel.length();
         const closing = -rel.dot(O.vel) / Math.max(d, 1);
@@ -904,6 +1420,7 @@ function step(dt, now) {
     if (!e.ai || !e.aiOut) continue;
     const pl = e.plane, out = e.aiOut, tgt = pl.tgt;
     pl.weapon = out.weapon;
+    if (out.weapon === 'ag') { pl.agKey = out.agKey; pl.agt = out.agTgt; pl.agLocked = true; }
     updateRadar(pl, tgt, dt, out.wantStt, combat.chaff);
     pl.lockTgt = pl.radar.stt ? tgt : null;
     updateIrst(pl, tgt, dt);
@@ -922,6 +1439,19 @@ function step(dt, now) {
   }
 
   combat.update(dt, all, now, G.mode === 'online' ? net.oneWay : 0);
+
+  // ---- flight recorder, career flight time ----
+  if (G.phase === 'fight' || G.phase === 'roundEnd') rec.update(dt, G.ents, G.units, combat.enemyMissiles(-1));
+  if (G.phase === 'fight' && P && P.alive && G.stats) G.stats.flight += dt;
+  if (G.mission && G.mission.sv && G.mine && G.mission.sv.wave > (G.waveSeen || 0)) { G.waveSeen = G.mission.sv.wave; if (G.waveSeen > 1) profile.wave(G.waveSeen - 1); }
+
+  // ---- training lesson ----
+  if (G.lesson && G.phase === 'fight' && me && P) {
+    if (G.lesson.update(dt, lessonContext(me, enemyMsl[me.side]))) {
+      audio.beep(1560, 0.12, 0.12); setTimeout(() => audio.beep(2080, 0.16, 0.12), 120);
+      if (G.lesson.finished) { hud.showBanner('LESSON COMPLETE', LESSONS[G.lesson.key].name, '#9dffb8', 4); if (hooksOut.lesson) hooksOut.lesson(G.lesson); }
+    }
+  }
 
   // ---- network send ----
   if (G.mode === 'online') {
@@ -948,10 +1478,32 @@ function step(dt, now) {
       }
       if (l.length) net.send({ t: 'S', r: G.round, l });
     }
+    G.unitSendT -= dt;
+    if (G.unitSendT <= 0 && G.role === 'host' && G.units.length) {
+      G.unitSendT = 0.2;
+      const ms = [];
+      for (const u of G.units) { const x = missilesOf(u); if (x.length || u.hadMsl) ms.push([u.id, x]); u.hadMsl = x.length > 0; }
+      net.send({ t: 'U', r: G.round, u: packUnits(G.units), m: ms });
+    }
   }
 }
 
 const DEAD = { alive: false, hp: 0 };
+
+// What a training lesson's steps look at.
+function lessonContext(me, msl) {
+  const P = me.plane, tgt = P.tgt;
+  const mk = G.scn.markers[0];
+  const agW = P.weapon === 'ag' && P.agKey ? WEAPONS[P.agKey] : null;
+  return {
+    alive: P.alive, hp: P.hp, alt: P.pos.y, agl: P.pos.y - groundHeight(P.pos.x, P.pos.z), vy: P.vel.y, speed: P.speed, g: P.g,
+    bank: Math.asin(Math.max(-1, Math.min(1, P.right.y))), throttle: P.throttle, airbrake: P.airbrake, gear: P.gear, flaps: P.flaps,
+    weapon: P.weapon, agCls: agW ? agW.cls : null, agLocked: !!P.agLocked, locked: !!P.locked, stt: !!P.radar.stt,
+    tgtDist: tgt && tgt.alive ? tgt.pos.distanceTo(P.pos) : 1e9, markDist: mk ? Math.hypot(P.pos.x - mk.x, P.pos.z - mk.z) : 1e9,
+    landed: P.landed ? P.landed.phase : null, kills: me.kills, gk: me.groundKills || 0, units: G.units, stats: G.stats,
+    threats: msl.filter((m) => m.target === P && m.phase !== 'none').length, padlock: !!G.padlock,
+  };
+}
 function drawHud(dt) {
   const inGame = G.mode && G.phase !== 'menu';
   if (!inGame) { hud.draw({ active: false }, dt); return; }
@@ -962,14 +1514,16 @@ function drawHud(dt) {
     active: true, teams, feed: G.feed, roundsToWin: G.scn.rounds,
     timeLeft: G.scn.timeLimit > 0 ? Math.max(0, G.scn.timeLimit * 60 - G.roundT) : null,
     countdown: G.phase === 'countdown' ? G.phaseT : 0,
-    countdownMsg: sepKm <= 10 ? 'WEAPONS SAFE — MERGE INBOUND' : `WEAPONS SAFE — ENEMY ABOUT ${sepKm} KM AHEAD, FIND THEM ON RADAR`,
+    lesson: G.lesson ? G.lesson.hud() : null,
+    countdownMsg: G.lesson ? `TRAINING — ${LESSONS[G.lesson.key].name.toUpperCase()}` : G.scn.mode === 'training' ? 'FREE FLIGHT' : G.race ? `TIME TRIAL — fly through the ${G.race.gates.length} gates in order${G.scn.ceiling ? `, stay below ${G.scn.ceiling} m above the ground` : ''}` : G.scn.mode === 'survival' ? 'SURVIVAL — hold out against wave after wave. Land on the carrier to rearm.' : sepKm <= 10 ? 'WEAPONS SAFE — MERGE INBOUND' : `WEAPONS SAFE — ENEMY ABOUT ${sepKm} KM AHEAD, FIND THEM ON RADAR`,
     msg: G.msgT > 0 ? G.msg : '', ping: G.mode === 'online' ? net.rtt : null,
     project, camSpace, camPos: camera.position,
+    ...missionHud(me),
   };
   if (!P || !P.alive) {
     const S = G.spectate;
     const deathCam = G.death && G.death.t < 6.5 && P;
-    hud.draw({ ...base, plane: P || DEAD, radar: {}, lock: {}, spectate: !deathCam && S ? `SPECTATING ${S.name} · ${jetOf(S.plane.type).name}   (N: next)` : null }, dt);
+    hud.draw({ ...base, plane: P || DEAD, radar: {}, lock: {}, spectate: deathCam && G.death.kill ? G.death.kill : G.freeCam ? 'FREE CAMERA — WASD move, R/F up/down, drag the mouse or arrows to look, wheel = speed, P to exit' : !deathCam && S ? `SPECTATING ${S.name} · ${jetOf(S.plane.type).name}   (N: next · P: free camera)` : null }, dt);
     return;
   }
   const R = P.radar;
@@ -1042,7 +1596,272 @@ function drawHud(dt) {
     lock: { inCone: P.inCone, progress: P.lockProgress, locked: P.locked }, seekerPx,
     threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm,
     agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0, hint,
+    ...strikeHud(P, me, fpmPoint),
   }, dt);
+}
+
+// HUD data for missions: objectives, score, waves, time trial, respawn countdown.
+function missionHud(me) {
+  const M = G.mission, side = me ? me.side : 0, out = {};
+  if (!M) return out;
+  if (M.obj.length) out.obj = M.obj.filter((o) => o.side === side).map((o) => ({ label: o.label || defaultLabel(o, G.units), state: o.state, prog: o.prog, optional: o.optional }));
+  if (M.sv) out.missionScore = `WAVE ${M.sv.wave}${G.scn.survival.max ? '/' + G.scn.survival.max : ''}${M.sv.breakT > 0 && M.sv.cleared === M.sv.wave && !M.isSurvivalOver() ? ` · next wave in ${Math.ceil(M.sv.breakT)} s` : ''}`;
+  else if (G.scn.rules.win === 'score') out.missionScore = `SCORE ${M.score[0]} – ${M.score[1]}  (first to ${G.scn.rules.scoreLimit})`;
+  if (me && !me.plane.alive && me.respawnT > 0) out.respawn = me.respawnT;
+  if (G.race && me) {
+    const st = G.race.of(me), g = G.race.gates[st.next], P = me.plane;
+    out.race = { time: fmtTime(st.done ? st.final : st.t + st.pen), next: st.next, gates: G.race.gates.length, lap: st.lap, laps: G.scn.laps, pen: st.pen, high: st.high, ceiling: G.scn.ceiling, done: st.done, gate: g ? g.pos : null, dist: g ? g.pos.distanceTo(P.pos) : 0, best: G.bestTime || null };
+  }
+  return out;
+}
+
+// HUD data for ground attack, aircraft systems and carrier recovery.
+const _gp = new THREE.Vector3();
+function strikeHud(P, me, fpmPoint) {
+  const out = {};
+  const gnd = [];
+  for (const [u, k] of G.ground) {
+    if (!u.alive) continue;
+    const isT = P.weapon === 'ag' && u === P.agt;
+    const cls = P.agKey && WEAPONS[P.agKey] ? WEAPONS[P.agKey].cls : null;
+    gnd.push({ pos: u.pos.clone().setY(u.base + Math.min(u.h, 30) * 0.6), name: u.name, code: u.T && u.T.rwr, emit: u.radarMode > 0, tgt: isT, lock: isT && (cls === 'agm' || cls === 'ashm') ? P.agLock || 0 : null, how: k.how, dist: u.pos.distanceTo(P.pos) });
+  }
+  for (const u of G.units) {
+    if (!u.alive || u.side !== me.side || !u.D.ship) continue;
+    const d = u.pos.distanceTo(P.pos);
+    if (d < 40000) gnd.push({ pos: u.pos.clone().setY(u.base + 20), name: u.name, friend: true, dist: d });
+  }
+  out.gnd = gnd;
+  const kinds = agKinds(P.stores);
+  const key = P.weapon === 'ag' && P.agKey ? P.agKey : kinds[0];
+  if (key || P.weapon === 'ag') {
+    const w = WEAPONS[key];
+    let n = key ? countKey(P.stores, key) : 0;
+    if (w && w.cls === 'rkt') { n = n * w.shots; for (const [st, used] of Object.entries(P.podN || {})) if (P.stores[st] === key) n -= used; }
+    out.ag = { cls: w ? AG_LABEL[w.cls] || 'A/G' : 'A/G', name: w ? w.short || w.name : '—', n, kinds: kinds.length };
+  }
+  if (G.ccip && P.weapon === 'ag') {
+    out.ccip = G.ccip; out.fpm = fpmPoint;
+    const T = P.agt;
+    out.ccipHot = !!(T && T.alive && Math.hypot(G.ccip.pos.x - T.pos.x, G.ccip.pos.z - T.pos.z) < T.r + WEAPONS[P.agKey].blast * 0.6);
+  }
+  out.sys = { flaps: P.flaps, gear: P.gear, trim: input.trim, brake: P.airbrake, dmg: P.dmg, fire: P.fireT > 0, gearOver: P.gear && !P.landed && P.speed > GEAR_VMAX, flapsOver: input.flaps > 0 && P.flaps === 0 && P.speed > FLAP_VMAX };
+  out.deck = deckStatus(P);
+  if (G.radioMenu) out.radio = RADIO.map((r) => r[1]);
+  // carrier approach cues
+  const cv = carrierOf(me.side);
+  if (cv && !P.landed) {
+    const q = cv.toDeck(P.pos), D = cv.D.deck;
+    const behind = -D.len / 2 + 55 - q.along;
+    const dist = Math.hypot(q.along, q.across);
+    const lined = (P.fwd.x * Math.sin(cv.hdgR) - P.fwd.z * Math.cos(cv.hdgR)) > 0.8;
+    if ((P.gear || dist < 6000) && behind > -40 && behind < 12000 && lined) {
+      const ideal = Math.tan(0.061) * Math.max(0, behind);
+      const dh = q.y - ideal;
+      const line = Math.abs(q.across) < 12 ? 'ON CENTERLINE' : q.across > 0 ? 'COME LEFT' : 'COME RIGHT';
+      const slope = dh > 18 ? 'HIGH' : dh < -18 ? 'LOW' : 'ON GLIDESLOPE';
+      const kt = Math.round(P.speed * 1.944);
+      out.carrierCue = { name: cv.name, dist, line: `${line}`, slope: `${slope} · ${kt} kt${kt > 175 ? ' FAST' : kt < 120 ? ' SLOW' : ''}`, gear: P.gear, ok: line === 'ON CENTERLINE' && slope === 'ON GLIDESLOPE' && P.gear };
+    }
+  }
+  // briefing markers
+  if (G.scn.markers.length) {
+    G.markPos = G.markPos || G.scn.markers.map((m) => new THREE.Vector3(m.x, groundHeight(m.x, m.z) + 60, m.z));
+    out.marks = G.scn.markers.map((m, i) => ({ pos: G.markPos[i], label: m.label, icon: m.icon, dist: G.markPos[i].distanceTo(P.pos) }));
+  }
+  return out;
+}
+
+// ---------------- replay viewer ----------------
+// Plays back the flight recorder in 3D after a match: the simulation is frozen and every jet is
+// posed from the recording. Space pauses, Q/E skip 10 s, R/F change speed, N follows the next jet,
+// P frees the camera, Esc returns to the debrief.
+const _rq = new THREE.Quaternion(), _rv = new THREE.Vector3(), _rv2 = new THREE.Vector3();
+const replayMsl = [];
+const _mslGeo = new THREE.CylinderGeometry(0.12, 0.12, 3.6, 6).rotateX(Math.PI / 2), _mslMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e8 });
+function startReplay(t0 = 0, follow = null, kill = null) {
+  if (!rec.frames.length) { toast('Nothing was recorded.'); return; }
+  effects.clear(); wrecks.clear(); combat.clear();
+  const ids = [...rec.at(t0).jets.keys()];
+  const ok = (id) => id != null && G.byId[id] && !G.byId[id].unit;
+  G.replay = { t: t0, last: t0, speed: 1, playing: true, follow: ok(follow) ? follow : G.mine ? G.mine.id : ids[0], kill: ok(follow) ? kill : null, end: rec.length };
+  G.freeCam = false; G.specQuat.copy(camera.quaternion);
+  aar.playing = false;
+  showScreen(null);
+  $('replayBar').classList.add('show');
+}
+function stopReplay() {
+  if (!G.replay) return;
+  G.replay = null; G.freeCam = false;
+  for (const m of replayMsl) m.visible = false;
+  $('replayBar').classList.remove('show');
+  effects.clear();
+  if (G.phase === 'matchEnd') showEnd(); else showScreen(null);
+}
+function replaySeek(d) { const R = G.replay; if (!R) return; R.t = Math.max(0, Math.min(R.end, R.t + d)); R.last = R.t; effects.clear(); }
+function replayNext() {
+  const R = G.replay; if (!R) return;
+  const ids = [...rec.at(R.t).jets.keys()].filter((id) => G.byId[id]).sort((a, b) => a - b);
+  if (!ids.length) return;
+  R.follow = ids[(ids.indexOf(R.follow) + 1) % ids.length]; R.kill = null; G.freeCam = false;
+}
+function replayStep(dt) {
+  const R = G.replay;
+  if (input.tapped('gun')) R.playing = !R.playing;
+  if (input.tapped('yawLeft')) replaySeek(-10);
+  if (input.tapped('yawRight')) replaySeek(10);
+  if (input.tapped('throttleUp')) R.speed = Math.min(8, R.speed * 2);
+  if (input.tapped('throttleDown')) R.speed = Math.max(0.25, R.speed / 2);
+  if (input.tapped('cycle')) replayNext();
+  if (R.playing) R.t = Math.min(R.end, R.t + dt * R.speed);
+  if (R.t >= R.end) R.playing = false;
+  if (R.kill && R.t > R.kill.t + 3) { stopReplay(); return; }
+  const st = rec.at(R.t);
+  for (const e of G.ents) {
+    const x = st.jets.get(e.id), pl = e.plane;
+    if (!x) { pl.alive = false; continue; }
+    pl.alive = true; pl.pos.copy(x.pos); pl.quat.copy(x.quat); pl.vel.copy(x.vel); pl.speed = x.vel.length();
+    pl.hp = 100; pl.g = 1; pl.alpha = 0; pl.eng = 1; pl.throttle = 1;
+    if (pl.updateAxes) pl.updateAxes(); else { pl.fwd && pl.fwd.set(0, 0, -1).applyQuaternion(pl.quat); pl.up && pl.up.set(0, 1, 0).applyQuaternion(pl.quat); }
+  }
+  G.units.forEach((u, i) => { u.alive = st.units[i] !== '0'; });
+  for (let j = 0; j < st.up.length; j += 3) { const u = G.units[st.up[j]]; if (u) { u.pos.x = st.up[j + 1]; u.pos.z = st.up[j + 2]; } }
+  // missiles: a body plus a smoke trail
+  st.missiles.forEach((m, i) => {
+    let mesh = replayMsl[i];
+    if (!mesh) { mesh = replayMsl[i] = new THREE.Mesh(_mslGeo, _mslMat); scene.add(mesh); }
+    mesh.visible = true; mesh.position.copy(m.pos);
+    if (m.vel.lengthSq() > 1) mesh.lookAt(_rv.copy(m.pos).add(m.vel));
+    if (R.playing) effects.missileTrail(m.pos, m.vel, m.burning, '', 0.5 * Math.min(1, R.speed));
+  });
+  for (let i = st.missiles.length; i < replayMsl.length; i++) replayMsl[i].visible = false;
+  // explosions as the playhead crosses each kill
+  if (R.t > R.last) for (const ev of rec.events) {
+    if (ev.t <= R.last || ev.t > R.t || !ev.at) continue;
+    _rv.set(ev.at[0], ev.at[2], ev.at[1]);
+    effects.explosion(_rv, _rv2.set(0, 0, 0), true);
+    if (ev.type === 'unit') effects.fireball(_rv, _rv2, 1.2);
+    audio.explosion(_rv, true);
+  }
+  R.last = R.t;
+}
+function replayCamera(dt) {
+  const R = G.replay, F = G.byId[R.follow];
+  const pl = F && !F.unit ? F.plane : null;
+  if (!pl || !pl.alive) {
+    // the followed jet is gone: orbit the spot where it was last seen
+    R.ang = (R.ang || 0) + dt * 0.25;
+    const f = pl ? pl.pos : camera.position;
+    camera.position.set(f.x + Math.cos(R.ang) * 60, f.y + 25, f.z + Math.sin(R.ang) * 60);
+    camera.up.set(0, 1, 0); camera.lookAt(f);
+    return;
+  }
+  // kill replay: frame the shooter and its victim together
+  const V = R.kill ? G.byId[R.kill.victim] : null;
+  if (V && V.plane.alive && R.t < R.kill.t + 0.5) {
+    _rv.subVectors(V.plane.pos, pl.pos); const d = _rv.length(); _rv.normalize();
+    camera.position.copy(pl.pos).addScaledVector(_rv, -42); camera.position.y += 9;
+    camera.up.set(0, 1, 0); camera.lookAt(d > 3000 ? _rv2.copy(pl.pos).addScaledVector(_rv, 3000) : V.plane.pos);
+  } else {
+    _rq.copy(pl.quat).multiply(PITCH_DOWN);
+    G.specQuat.slerp(_rq, 1 - Math.exp(-dt * 5));
+    camera.quaternion.copy(G.specQuat);
+    _off.set(0, 6, 32).applyQuaternion(G.specQuat);
+    camera.position.copy(pl.pos).add(_off);
+  }
+  const gh = groundHeight(camera.position.x, camera.position.z) + 3;
+  if (camera.position.y < gh) camera.position.y = gh;
+}
+let rpBarT = 0;
+function updateReplayBar() {
+  const R = G.replay;
+  if (!R || (rpBarT += 1) % 6) return;
+  const F = G.byId[R.follow];
+  $('rpPlay').textContent = R.playing ? '⏸' : '▶';
+  $('rpSpeed').textContent = `${R.speed}×`;
+  if (document.activeElement !== $('rpT')) $('rpT').value = Math.round((R.t / Math.max(1, R.end)) * 1000);
+  $('rpTime').textContent = `${fmtTime(R.t)} / ${fmtTime(R.end)}`;
+  $('rpFollow').textContent = G.freeCam ? 'Free camera (WASD, R/F, mouse drag)' : R.kill ? `Kill cam: ${F ? F.name : ''}` : F ? `${F.name} · ${jetOf(F.plane.type).name}` : '';
+}
+
+// ---------------- free camera (spectating and replays) ----------------
+const fc = { yaw: 0, pitch: 0, speed: 150 };
+function toggleFreeCam() {
+  G.freeCam = !G.freeCam;
+  if (G.freeCam) { const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ'); fc.yaw = e.y; fc.pitch = e.x; flash('FREE CAMERA — P to exit', 1.6); }
+}
+function freeCamUpdate(dt) {
+  const k = (c) => input.down.has(c), m = input.mouse;
+  fc.yaw -= m.dx * 0.0035 + ((k('ArrowRight') ? 1 : 0) - (k('ArrowLeft') ? 1 : 0)) * dt * 1.4;
+  fc.pitch = Math.max(-1.5, Math.min(1.5, fc.pitch - m.dy * 0.0035 + ((k('ArrowUp') ? 1 : 0) - (k('ArrowDown') ? 1 : 0)) * dt * 1.1));
+  if (m.wheel) fc.speed = Math.max(20, Math.min(4000, fc.speed * (m.wheel < 0 ? 1.3 : 0.77)));
+  camera.up.set(0, 1, 0);
+  camera.quaternion.setFromEuler(new THREE.Euler(fc.pitch, fc.yaw, 0, 'YXZ'));
+  _rv.set((k('KeyD') ? 1 : 0) - (k('KeyA') ? 1 : 0), 0, (k('KeyS') ? 1 : 0) - (k('KeyW') ? 1 : 0)).applyQuaternion(camera.quaternion);
+  _rv.y += (k('KeyR') ? 1 : 0) - (k('KeyF') ? 1 : 0);
+  const sp = fc.speed * (k('ShiftLeft') || k('ShiftRight') ? 5 : 1);
+  camera.position.addScaledVector(_rv, sp * dt);
+  const gh = groundHeight(camera.position.x, camera.position.z) + 3;
+  if (camera.position.y < gh) camera.position.y = gh;
+}
+
+// ---------------- debrief: after-action map ----------------
+const aar = { t: 0, playing: false, raf: 0 };
+function setupAar() {
+  aar.t = rec.length; aar.playing = false; rec.view = null;
+  $('aarPlay').textContent = '▶ Play';
+  const has = rec.frames.length > 2;
+  $('btnReplay').disabled = !has;
+  const name = (id) => { const E = rec.ents[id]; return E ? esc(E.name) : '?'; };
+  const kills = rec.events.map((ev, i) => [ev, i]).filter(([ev]) => ev.type === 'kill');
+  $('aarKills').innerHTML = kills.length ? kills.map(([ev, i]) => `<div><span>${fmtTime(ev.t)} · ${ev.killer >= 0 ? `${name(ev.killer)} ▸ ` : ''}${name(ev.victim)} <span class="dim">(${WEAPON_WORD[ev.cause] || ev.cause})</span></span>${ev.killer >= 0 && ev.killer < 100 || ev.killer >= 300 ? `<button class="mini" data-k="${i}">🎥 Kill cam</button>` : ''}</div>`).join('') : '<span class="dim">No aircraft were lost.</span>';
+  cancelAnimationFrame(aar.raf);
+  let last = performance.now();
+  const loop = (now) => {
+    if (!$('end').classList.contains('show')) return;
+    aar.raf = requestAnimationFrame(loop);
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (aar.playing) {
+      aar.t = Math.min(rec.length, aar.t + dt * Math.max(10, rec.length / 40));
+      if (aar.t >= rec.length) { aar.playing = false; $('aarPlay').textContent = '▶ Play'; }
+      drawAarNow();
+    }
+  };
+  requestAnimationFrame(() => { drawAarNow(); aar.raf = requestAnimationFrame(loop); });
+}
+function drawAarNow() {
+  drawAar($('aarMap'), rec, aar.t);
+  $('aarT').value = Math.round((aar.t / Math.max(1, rec.length)) * 1000);
+  $('aarTime').textContent = `${fmtTime(aar.t)} / ${fmtTime(rec.length)}`;
+}
+
+// ---------------- briefing and profile screens ----------------
+let briefNext = null;
+function showBriefing(scn, onGo) {
+  briefNext = onGo;
+  $('brKind').textContent = scn.mode === 'training' ? 'Training lesson' : scn.mode === 'race' ? 'Time trial' : scn.mode === 'survival' ? 'Survival' : 'Mission briefing';
+  $('brTitle').textContent = scn.name;
+  const paras = (scn.briefing || scn.desc || '').split(/\n\s*\n|\n/).filter(Boolean);
+  $('brText').innerHTML = paras.map((p) => `<p>${esc(p)}</p>`).join('');
+  const objs = scn.objectives.filter((o) => o.side === 0);
+  const tmpUnits = scn.units.map((u) => ({ name: u.name || UNITS[u.key].short }));
+  $('brObj').innerHTML = objs.length ? `<h2>Objectives</h2><ul class="brobj">${objs.map((o) => `<li>${esc(o.label || defaultLabel(o, tmpUnits))}${o.optional ? ' <span class="dim">(optional)</span>' : ''}</li>`).join('')}</ul>` : '';
+  $('brFly').textContent = onGo ? 'Fly (Enter)' : 'Back to the fight (Enter)';
+  $('brBack').style.display = onGo ? '' : 'none';
+  showScreen('briefing');
+  requestAnimationFrame(() => drawBrief($('brMap'), scn));
+}
+function briefingGo() {
+  const go = briefNext; briefNext = null;
+  if (go) go(); else if (G.paused) togglePause(); else showScreen(null);
+}
+function showProfile() {
+  showScreen('profile');
+  renderProfile($('profilePanel'), profile, settings, {
+    save: () => { saveSettings(); $('callsign').value = settings.name; sendChoice(); },
+    close: () => showScreen(G.room ? 'room' : 'menu'),
+    scenarioName: (id) => (findScenario(id) || { name: id }).name,
+  });
 }
 
 // ---------------- UI ----------------
@@ -1068,19 +1887,30 @@ function togglePause() {
   if (G.phase === 'matchEnd') return;
   G.paused = !G.paused;
   $('pauseNote').textContent = G.mode === 'online' ? 'Online match: the fight continues while this menu is open!' : 'Practice paused.';
+  $('btnPauseBrief').style.display = G.scn && (G.scn.briefing || G.scn.mode !== 'battle') ? '' : 'none';
   showScreen(G.paused ? 'pause' : null);
 }
 function showEnd() {
   const sd = G.scn.sides;
   const win = G.rw[0] === G.rw[1] ? -1 : G.rw[0] > G.rw[1] ? 0 : 1;
   const mySide = G.mine ? G.mine.side : null;
+  if (G.mine && !G.profiled) {
+    G.profiled = true;
+    if (G.mission && G.mission.sv) profile.wave(G.mission.sv.wave - (G.lastResult && G.lastResult.win === 0 ? 0 : 1));
+    profile.matchEnd(G.stats, win < 0 ? null : win === mySide, G.mode === 'online');
+  }
   const t = $('endTitle');
   if (mySide == null) { t.textContent = win < 0 ? 'DRAW' : `${sd[win].name.toUpperCase()} WINS`; t.className = ''; }
   else { t.textContent = win === mySide ? 'VICTORY' : win < 0 ? 'DRAW' : 'DEFEAT'; t.className = win === mySide ? 'win' : 'lose'; }
   $('endScore').textContent = `${sd[0].name} ${G.rw[0]} – ${G.rw[1]} ${sd[1].name}`;
   const rows = G.ents.slice().sort((a, b) => b.kills - a.kills || a.deaths - b.deaths).map((e) =>
-    `<tr style="color:${SIDE_COLORS[e.side]}"><td>${esc(e.name)}${e === G.mine ? ' (you)' : ''}</td><td>${esc(jetOf(e.type).name)}</td><td>${e.kills}</td><td>${e.deaths}</td></tr>`).join('');
-  $('endStats').innerHTML = `<table class="stats"><tr><th>Pilot</th><th>Aircraft</th><th>Kills</th><th>Deaths</th></tr>${rows}</table>`;
+    `<tr style="color:${SIDE_COLORS[e.side]}"><td>${esc(e.name)}${e === G.mine ? ' (you)' : ''}</td><td>${esc(jetOf(e.type).name)}</td><td>${e.kills}</td><td>${e.groundKills || 0}</td><td>${e.deaths}</td></tr>`).join('');
+  $('endStats').innerHTML = `<table class="stats"><tr><th>Pilot</th><th>Aircraft</th><th>Kills</th><th>Ground</th><th>Deaths</th></tr>${rows}</table>`;
+  const st = G.stats, pc = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '—');
+  $('endMine').innerHTML = G.mine && st ? `<p>Your sortie: ${G.mine.kills} air kill${G.mine.kills === 1 ? '' : 's'}, ${G.mine.groundKills || 0} ground, missiles ${st.mslHits}/${st.msl} (${pc(st.mslHits, st.msl)}), gun ${pc(st.gunHits, st.rounds)} of ${st.rounds} rounds on target${st.ag ? `, A/G ${st.agHits} hits from ${st.ag} releases` : ''}${st.traps ? `, ${st.traps} trap${st.traps > 1 ? 's' : ''}` : ''}, ${fmtTime(st.flight)} in the air.</p>` : '';
+  const fresh = profile.fresh.map((id) => MEDAL_BY_ID[id]).filter(Boolean);
+  $('endMedals').innerHTML = fresh.length ? `<h2>Medals earned</h2><div class="medals">${fresh.map((m) => `<div class="medal on"><span class="ic">${m.ic}</span><b>${esc(m.name)}</b>${esc(m.desc)}</div>`).join('')}</div>` : '';
+  setupAar();
   $('endStatus').textContent = G.mode === 'online' && G.role !== 'host' ? 'Waiting for the host…' : '';
   $('btnRematch').textContent = G.mode === 'online' ? 'Back to room' : 'Fly again';
   $('btnRematch').style.display = G.mode === 'online' && G.role !== 'host' ? 'none' : '';
@@ -1141,8 +1971,9 @@ function renderLobby() {
 function fillScenarioSelect(sel, selected) {
   sel.innerHTML = '';
   const g1 = document.createElement('optgroup'); g1.label = 'Built-in';
-  for (const s of PRESETS) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; g1.appendChild(o); }
-  sel.appendChild(g1);
+  const gT = document.createElement('optgroup'); gT.label = 'Training';
+  for (const s of PRESETS) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; (s.extra && s.extra.mode === 'training' || s.mode === 'training' ? gT : g1).appendChild(o); }
+  sel.appendChild(g1); sel.appendChild(gT);
   const extra = userScenarios.slice();
   if (G.lobby && G.lobby.scn && !findScenario(G.lobby.scn.id) && selected === G.lobby.scn.id) extra.push(G.lobby.scn);
   if (extra.length) {
@@ -1225,8 +2056,8 @@ function buildHangar() {
 }
 function sendChoice() {
   if (!G.room) return;
-  if (G.role === 'host' && G.lobby) { G.lobby.choices[G.myId] = { jet: settings.jet, loadout: settings.loadout }; broadcastLobby(); renderLobby(); }
-  else net.send({ t: 'choice', to: G.hostId, jet: settings.jet, loadout: settings.loadout });
+  if (G.role === 'host' && G.lobby) { G.lobby.choices[G.myId] = myChoice(); broadcastLobby(); renderLobby(); }
+  else net.send({ t: 'choice', to: G.hostId, ...myChoice() });
 }
 
 // ---- scenario builder ----
@@ -1241,6 +2072,7 @@ const builder = new Builder($('builder'), {
 });
 
 function initMenu() {
+  if (noWebGL) setTimeout(() => toast('Your browser could not start WebGL, so the 3D view is unavailable. Try enabling hardware acceleration or restarting the browser.'), 500);
   $('callsign').value = settings.name;
   $('invert').checked = settings.invert;
   $('sound').checked = settings.sound;
@@ -1271,14 +2103,31 @@ function initMenu() {
   // pause / help / end
   $('btnResume').onclick = () => togglePause();
   $('btnControls').onclick = () => $('help').classList.add('show');
+  $('btnPauseBrief').onclick = () => { if (G.scn) showBriefing(G.scn, null); };
   $('btnQuit').onclick = () => quitToMenu();
   $('btnHelpClose').onclick = () => $('help').classList.remove('show');
   $('btnMenuHelp').onclick = () => $('help').classList.add('show');
   $('btnRematch').onclick = () => {
-    if (G.mode === 'ai') { startPractice(G.lastPractice || PRESETS[0]); return; }
+    if (G.mode === 'ai') { startPractice(G.lastPractice || PRESETS[0], true); return; }
     if (G.role === 'host') hostBackToLobby();
   };
   $('btnEndMenu').onclick = () => quitToMenu();
+  $('btnReplay').onclick = () => startReplay(0, null, null);
+  $('aarPlay').onclick = () => { aar.playing = !aar.playing; if (aar.playing && aar.t >= rec.length - 0.1) aar.t = 0; $('aarPlay').textContent = aar.playing ? '⏸ Pause' : '▶ Play'; };
+  $('aarT').oninput = (e) => { aar.t = (+e.target.value / 1000) * rec.length; aar.playing = false; $('aarPlay').textContent = '▶ Play'; drawAarNow(); };
+  $('aarKills').onclick = (e) => { const b = e.target.closest('button[data-k]'); if (!b) return; const ev = rec.events[+b.dataset.k]; startReplay(Math.max(0, ev.t - 7), ev.killer, ev); };
+  $('rpPlay').onclick = () => { if (G.replay) G.replay.playing = !G.replay.playing; };
+  $('rpBack').onclick = () => replaySeek(-10);
+  $('rpFwd').onclick = () => replaySeek(10);
+  $('rpSpeed').onclick = () => { if (G.replay) { const v = [0.25, 0.5, 1, 2, 4, 8]; G.replay.speed = v[(v.indexOf(G.replay.speed) + 1) % v.length]; } };
+  $('rpT').oninput = (e) => { if (G.replay) { G.replay.t = (+e.target.value / 1000) * rec.length; G.replay.last = G.replay.t; effects.clear(); } };
+  $('rpNext').onclick = () => replayNext();
+  $('rpFree').onclick = () => toggleFreeCam();
+  $('rpExit').onclick = () => stopReplay();
+  $('btnProfile').onclick = () => { readMenu(); showProfile(); };
+  $('brFly').onclick = () => briefingGo();
+  $('brBack').onclick = () => { if (G.mode) { if (G.paused) togglePause(); quitToMenu(); } else showScreen('menu'); };
+  window.addEventListener('keydown', (e) => { if (e.key === 'Enter' && $('briefing').classList.contains('show')) briefingGo(); });
   for (const el of document.querySelectorAll('#menu input, #menu select')) el.addEventListener('change', readMenu);
   $('loadout').addEventListener('change', () => { readMenu(); sendChoice(); });
   showScreen('menu');
@@ -1295,4 +2144,8 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder };
+window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView,
+  // advance the game n frames of 1/60 s (for testing when the tab is in the background)
+  get acc() { return acc; },
+  tick(n = 60) { G.noRender = true; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },
+};

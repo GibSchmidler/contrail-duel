@@ -187,6 +187,61 @@ export const JETS_OF = (country) => Object.keys(JETS).filter((k) => JETS[k].coun
 export const DEFAULT_JET = 'f16c';
 export const jetOf = (key) => JETS[key] || JETS[DEFAULT_JET];
 
+// Air-to-ground loadouts. The F-15C is a pure air-superiority fighter and carries none.
+const AG_LOADOUTS = {
+  f16c: {
+    strike: ['Strike (laser bombs)', ['aim9x', 'aim9x', 'aim120', 'aim120', 'gbu12', 'gbu12']],
+    sead: ['SEAD (HARM)', ['aim9x', 'aim9x', 'aim120', 'aim120', 'agm88', 'agm88']],
+    cas: ['Close air support', ['aim9x', 'aim9x', 'agm65', 'agm65', 'hydra', 'hydra']],
+    bombs: ['Iron bombs', ['aim9x', 'aim9x', 'mk82', 'mk82', 'mk82', 'mk82']],
+  },
+  fa18e: {
+    strike: ['Strike (JDAM + laser)', ['aim9x', 'aim9x', 'gbu38', 'gbu38', 'gbu12', 'gbu12', 'aim120d', 'aim120d']],
+    sead: ['SEAD (HARM + Maverick)', ['aim9x', 'aim9x', 'agm88', 'agm88', 'agm65', 'agm65', 'aim120d', 'aim120d']],
+    antiship: ['Anti-ship (Harpoon)', ['aim9x', 'aim9x', 'agm84', 'agm84', null, null, 'aim120d', 'aim120d']],
+    cas: ['Close air support', ['aim9x', 'aim9x', 'agm65', 'agm65', 'hydra', 'hydra', 'mk82', 'mk82']],
+  },
+  f22a: { strike: ['Internal strike (JDAM)', ['aim9x', 'aim9x', 'gbu38', 'gbu38', 'aim120d', 'aim120d', null, null]] },
+  mig29s: {
+    strike: ['Strike (Kh-29T)', ['r73', 'r73', 'ofab250', 'ofab250', 'kh29t', 'kh29t']],
+    cas: ['Rockets and bombs', ['r73', 'r73', 's8', 's8', 'ofab250', 'ofab250']],
+  },
+  su35s: {
+    strike: ['Strike (Kh-29T + KAB)', ['r74m', 'r74m', 'kh29t', 'kh29t', 'kab500', 'kab500', 'r771', 'r771']],
+    sead: ['SEAD (Kh-31P)', ['r74m', 'r74m', 'kh31p', 'kh31p', 'kh31p', 'kh31p', 'r771', 'r771']],
+    antiship: ['Anti-ship (Kh-35)', ['r74m', 'r74m', 'kh35', 'kh35', null, null, 'r771', 'r771']],
+  },
+  su57: {
+    sead: ['Internal SEAD (Kh-31P)', ['r74m', 'r74m', 'kh31p', 'kh31p', 'r77m', 'r77m']],
+    strike: ['Internal strike (KAB)', ['r74m', 'r74m', 'kab500', 'kab500', 'r77m', 'r77m']],
+  },
+  j10c: {
+    strike: ['Strike (LS-6)', ['pl10', 'pl10', 'ls6', 'ls6', 'pl12', 'pl12']],
+    cas: ['Close air support', ['pl10', 'pl10', 'akd10', 'akd10', 'hf90', 'hf90']],
+  },
+  j16: {
+    strike: ['Strike (LS-6 + YJ-91)', ['pl10', 'pl10', 'yj91', 'yj91', 'ls6', 'ls6', 'pl15', 'pl15']],
+    antiship: ['Anti-ship (YJ-83K)', ['pl10', 'pl10', 'yj83', 'yj83', null, null, 'pl15', 'pl15']],
+    cas: ['Close air support', ['pl10', 'pl10', 'akd10', 'akd10', 'gb250', 'gb250', 'pl15', 'pl15']],
+  },
+  j20a: { strike: ['Internal strike (LS-6)', ['pl10', 'pl10', 'ls6', 'ls6', 'pl15', 'pl15']] },
+  typhoon: {
+    strike: ['Strike (Paveway IV)', ['irist', 'irist', 'pw4', 'pw4', 'meteor', 'meteor', 'meteor', 'meteor']],
+    sead: ['SEAD (ALARM)', ['irist', 'irist', 'alarm', 'alarm', 'meteor', 'meteor', 'meteor', 'meteor']],
+    cas: ['Close air support (Brimstone)', ['irist', 'irist', 'brim', 'brim', 'meteor', 'meteor', null, null]],
+  },
+  rafale: {
+    strike: ['Strike (Hammer)', ['micair', 'micair', 'hammer', 'hammer', 'hammer', 'hammer', 'micaem', 'micaem']],
+    antiship: ['Anti-ship (Exocet)', ['micair', 'micair', 'micaem', 'micaem', 'exocet', 'exocet', null, null]],
+    cas: ['Rockets and bombs', ['micair', 'micair', 'sneb', 'sneb', 'mk82', 'mk82', 'micaem', 'micaem']],
+  },
+  gripen: {
+    strike: ['Strike (Paveway IV)', ['irist', 'irist', 'meteor', 'meteor', 'pw4', 'pw4']],
+    cas: ['Close air support', ['irist', 'irist', 'brim', 'brim', 'sneb', 'sneb']],
+  },
+};
+for (const [k, L] of Object.entries(AG_LOADOUTS)) for (const [lk, [name, st]] of Object.entries(L)) JETS[k].loadouts[lk] = { name, st, ag: true };
+
 // Firing order: internal bays and fuselage first, then wing pylons, wingtips last.
 const KIND_ORDER = { bay: 0, body: 1, wing: 2, tip: 3 };
 for (const j of Object.values(JETS)) {

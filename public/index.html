@@ -34,6 +34,7 @@
           <label>Callsign <input id="callsign" maxlength="16" autocomplete="off"></label>
           <label class="check"><input type="checkbox" id="invert"> W pulls the nose up (unchecked = flight-stick style, S pulls up)</label>
           <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
+          <button id="btnProfile">Pilot profile, medals &amp; nose art</button>
           <button id="btnMenuHelp" class="ghost">Controls &amp; tips</button>
 
           <h2 class="mt">Online</h2>
@@ -101,6 +102,7 @@
       <h2>Paused</h2>
       <p id="pauseNote" class="dim"></p>
       <button id="btnResume" class="primary">Resume (Esc)</button>
+      <button id="btnPauseBrief">Briefing</button>
       <button id="btnControls">Controls</button>
       <button id="btnQuit">Leave match</button>
     </div>
@@ -108,14 +110,59 @@
 
   <!-- Match end -->
   <div id="end" class="screen">
-    <div class="panel mid">
+    <div class="panel wide">
       <h1 id="endTitle">VICTORY</h1>
       <p id="endScore" class="big"></p>
-      <div id="endStats"></div>
+      <div class="endgrid">
+        <div>
+          <div id="endStats"></div>
+          <div id="endMine" class="small"></div>
+          <div id="endMedals"></div>
+        </div>
+        <div class="aar">
+          <h2>After-action map</h2>
+          <canvas id="aarMap"></canvas>
+          <div class="brow"><button id="aarPlay" class="mini">▶ Play</button><input type="range" id="aarT" min="0" max="1000" value="1000"><span id="aarTime" class="small dim"></span></div>
+          <div class="brow"><button id="btnReplay" class="mini">🎥 Watch 3D replay</button></div>
+          <div id="aarKills" class="aarkills small"></div>
+        </div>
+      </div>
       <p id="endStatus" class="dim"></p>
       <button id="btnRematch" class="primary">Rematch</button>
       <button id="btnEndMenu">Main menu</button>
     </div>
+  </div>
+
+  <!-- Replay controls -->
+  <div id="replayBar">
+    <button id="rpPlay" class="mini">⏸</button>
+    <button id="rpBack" class="mini">−10 s</button>
+    <button id="rpFwd" class="mini">+10 s</button>
+    <button id="rpSpeed" class="mini">1×</button>
+    <input type="range" id="rpT" min="0" max="1000" value="0">
+    <span id="rpTime" class="small"></span>
+    <span id="rpFollow" class="small"></span>
+    <button id="rpNext" class="mini">Next jet (N)</button>
+    <button id="rpFree" class="mini">Free cam (P)</button>
+    <button id="rpExit" class="mini">Exit (Esc)</button>
+  </div>
+
+  <!-- Mission briefing -->
+  <div id="briefing" class="screen">
+    <div class="panel wide">
+      <h2 id="brKind">Mission briefing</h2>
+      <h1 id="brTitle" class="brtitle"></h1>
+      <div class="endgrid">
+        <div><div id="brText" class="brtext"></div><div id="brObj"></div></div>
+        <div><canvas id="brMap"></canvas><p class="dim small">Map: blue arrow = your start, ◆ SAM sites, ■ ground targets, flags = markers.</p></div>
+      </div>
+      <div class="brow"><button id="brFly" class="primary">Fly (Enter)</button><button id="brBack" class="ghost">Back to menu</button></div>
+    </div>
+  </div>
+
+  <!-- Pilot profile -->
+  <div id="profile" class="screen">
+    <div class="panel wide" id="profilePanel"></div>
   </div>
 
   <!-- Help overlay -->
@@ -139,6 +186,11 @@
           <tr><td><kbd>T</kbd></td><td>Padlock view (with a helmet sight, cues the IR seeker)</td></tr>
           <tr><td><kbd>G</kbd> (hold)</td><td>Look back</td></tr>
           <tr><td><kbd>V</kbd></td><td>Chase / cockpit view</td></tr>
+          <tr><td><kbd>3</kbd> · <kbd>X</kbd></td><td>Air-to-ground weapons (press again to cycle) · release (hold for rockets)</td></tr>
+          <tr><td><kbd>J</kbd> · <kbd>K</kbd></td><td>Gear · flaps</td></tr>
+          <tr><td><kbd>[</kbd> <kbd>]</kbd> <kbd>\</kbd></td><td>Trim down · up · reset</td></tr>
+          <tr><td><kbd>M</kbd> then <kbd>1</kbd>-<kbd>7</kbd></td><td>Wingman radio commands</td></tr>
+          <tr><td><kbd>P</kbd></td><td>Free camera (spectating / replay)</td></tr>
           <tr><td><kbd>Esc</kbd> · <kbd>H</kbd></td><td>Pause · this help</td></tr>
         </table>
         <div class="tips">

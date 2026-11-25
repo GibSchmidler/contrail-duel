@@ -50,6 +50,26 @@ function pointSegDist(a, b, out) {
   return _c1.copy(a).addScaledVector(_d1, t).length();
 }
 
+// Ground units are upright cylinders (radius r, height h) standing at u.pos.
+const _ua = new THREE.Vector3(), _ub = new THREE.Vector3();
+function hitsUnit(p0, p1, u, extra = 0) {
+  const base = u.base != null ? u.base : u.pos.y;
+  // sample the segment: units are big and bullets short, so a few points are plenty
+  for (let i = 0; i <= 3; i++) {
+    const t = i / 3;
+    const x = p0.x + (p1.x - p0.x) * t, y = p0.y + (p1.y - p0.y) * t, z = p0.z + (p1.z - p0.z) * t;
+    if (y < base - 1 || y > base + u.h + extra) continue;
+    if (u.box) {
+      // ships: an oriented box (length along the heading)
+      const dx = x - u.pos.x, dz = z - u.pos.z, c = Math.cos(u.hdgR), s = Math.sin(u.hdgR);
+      const along = dx * s - dz * c, across = dx * c + dz * s;
+      if (Math.abs(along) < u.box[0] / 2 + extra && Math.abs(across) < u.box[1] / 2 + extra) return true;
+    } else if ((x - u.pos.x) ** 2 + (z - u.pos.z) ** 2 < (u.r + extra) ** 2) return true;
+  }
+  return false;
+}
+export { hitsUnit };
+
 const _iq = new THREE.Quaternion(), _l0 = new THREE.Vector3(), _l1 = new THREE.Vector3();
 // Segment from (bullet0 - target0) to (bullet1 - target1), tested in target body frame.
 // `size` scales the capsules: a Flanker is a much bigger target than a Gripen.
@@ -59,11 +79,26 @@ function hitsAircraft(rel0, rel1, quat, size = 1) {
   _l1.copy(rel1).applyQuaternion(_iq).divideScalar(size);
   // coarse reject
   if (Math.min(_l0.lengthSq(), _l1.lengthSq()) > 400 && segSegDist2(_l0, _l1, HITBOX[0].a, HITBOX[0].b) > 64) return false;
-  for (const h of HITBOX) {
-    const rr = h.r + 0.25;
-    if (segSegDist2(_l0, _l1, h.a, h.b) < rr * rr) return true;
+  for (let i = 0; i < HITBOX.length; i++) {
+    const h = HITBOX[i], rr = h.r + 0.25;
+    if (segSegDist2(_l0, _l1, h.a, h.b) < rr * rr) return zoneAt(i, _c2);
   }
-  return false;
+  return null;
+}
+// Which system a hit at body point p (on capsule i) damages.
+function zoneAt(i, p) {
+  if (i === 0) return p.z < -4.5 ? 'radar' : p.z > 3.2 ? 'eng' : 'fuel';
+  if (i === 1 || i === 2) return Math.abs(p.x) < 1.3 ? 'fuel' : p.x > 0 ? 'wingR' : 'wingL';
+  return 'tail';
+}
+// A blast near the jet: the zone facing the explosion takes the brunt.
+const _bz = new THREE.Vector3();
+export function blastZone(target, pos) {
+  _bz.copy(pos).sub(target.pos).applyQuaternion(_iq.copy(target.quat).invert());
+  if (Math.abs(_bz.x) > Math.abs(_bz.z) * 0.8) return _bz.x > 0 ? 'wingR' : 'wingL';
+  if (_bz.z > 2) return Math.abs(_bz.y) > 2 ? 'tail' : 'eng';
+  if (_bz.z < -4) return 'radar';
+  return 'fuel';
 }
 
 // ------------------------------------------------------------------
@@ -84,6 +119,7 @@ export class Combat {
     this.popId = 1;
     this.missileSeq = 1;
     this.meshPool = {};
+    this.units = [];            // ground units and ships that bullets, bombs and missiles can hit
 
     // tracer rendering
     this.tracerPos = new Float32Array(MAX_BULLETS * 6);
@@ -108,6 +144,7 @@ export class Combat {
   }
 
   getMesh(key) {
+    if (WEAPONS[key] && WEAPONS[key].cls === 'rkt') key = 'rocket';   // the pod stays on the jet; a rocket flies
     const pool = this.meshPool[key] || (this.meshPool[key] = []);
     const m = pool.pop() || buildMissileMesh(key);
     m.userData.key = key;
@@ -138,7 +175,7 @@ export class Combat {
   launchMissile(plane, target, key, station = 0) {
     const w = WEAPONS[key];
     const mount = (plane.T && plane.T.stations[station]) || [0, -1.2, 0, 'body'];
-    const drop = mount[3] === 'bay' ? -14 : w.cls === 'mrm' ? -9 : -3;   // bay launchers kick the missile clear first
+    const drop = w.ag ? (mount[3] === 'bay' ? -8 : -1.5) : mount[3] === 'bay' ? -14 : w.cls === 'mrm' ? -9 : -3;   // bay launchers kick the missile clear first
     const m = {
       id: (plane.netId || 'L') + '-' + this.missileSeq++, key, w,
       owner: plane, target, decoy: null, seen: new Set(),
@@ -147,6 +184,18 @@ export class Combat {
       prev: new THREE.Vector3(), t: 0, lost: false, lostT: 0, mesh: this.getMesh(key), burning: true,
       phase: 'ir', est: new THREE.Vector3(), estVel: new THREE.Vector3(), mem: 0, minDist: 1e9,
     };
+    if (w.cls === 'rkt') {
+      // rockets leave the pod along the boresight with a little dispersion
+      const sp = w.spread || 0.004;
+      m.vel.copy(plane.vel).addScaledVector(_tmp.copy(plane.fwd).addScaledVector(plane.right, gauss() * sp).addScaledVector(plane.up, gauss() * sp).normalize(), 40);
+      m.pos.copy(plane.pos).addScaledVector(plane.right, mount[0]).addScaledVector(plane.up, mount[1] - 0.3).addScaledVector(plane.fwd, 2);
+    }
+    if (w.ag) {
+      // the aim point: the designated target, or (bombs without one) wherever they fall
+      if (target) { m.est.copy(target.pos); m.estVel.copy(target.vel || _tmp.set(0, 0, 0)); }
+      else if (m.aimPoint) m.est.copy(m.aimPoint);
+      m.phase = 'none';
+    }
     if (w.guidance === 'radar' || w.guidance === 'sarh') {
       const R = plane.radar;
       m.phase = w.guidance === 'sarh' ? 'sarh' : R && R.stt ? 'dl' : 'inertial';
@@ -233,11 +282,24 @@ export class Combat {
           const r0 = _tmp.copy(b.prev).sub(pl.prevPos);
           if (r0.lengthSq() > 250000) continue; // > 500 m away
           const r1 = _tmp2.copy(b.p).sub(pl.pos);
-          if (hitsAircraft(r0, r1, pl.quat, pl.T ? pl.T.size : 1)) {
+          const zone = hitsAircraft(r0, r1, pl.quat, pl.T ? pl.T.size : 1);
+          if (zone) {
             dead = true;
             fx.spark(b.p, pl.vel);
             if (b.big) fx.spark(b.p, pl.vel);
-            this.hooks.onDamage(pl, b.gun.damage, 'gun', b.owner, b.p);
+            this.hooks.onDamage(pl, b.gun.damage, 'gun', b.owner, b.p, zone);
+            break;
+          }
+        }
+      }
+      if (!dead && b.live && this.units.length) {
+        for (const u of this.units) {
+          if (!u.alive || u === b.owner || u.side === (b.owner && b.owner.side)) continue;
+          if (Math.abs(b.p.x - u.pos.x) > u.r + 40 || Math.abs(b.p.z - u.pos.z) > u.r + 40) continue;
+          if (hitsUnit(b.prev, b.p, u)) {
+            dead = true;
+            fx.spark(b.p, _tmp.set(0, 0, 0));
+            this.hooks.onDamage(u, b.gun.damage * (u.armor != null ? 1 - u.armor : 1), 'gun', b.owner, b.p);
             break;
           }
         }
@@ -324,7 +386,38 @@ export class Combat {
     const tgt = m.target;
     let aimPos = null, aimVel = null, loft = 0;
 
-    if (w.guidance === 'ir') {
+    if (w.guidance === 'ballistic') {
+      // ---- iron bombs and rockets: nothing steers them ----
+    } else if (w.guidance === 'gbomb') {
+      // ---- guided bomb: a laser bomb follows the spot while the shooter can see the target;
+      // a GPS bomb goes to the coordinates it was given at release ----
+      const o = m.owner;
+      if (w.laser && tgt && tgt.alive && o && o.alive && o.pos.distanceTo(tgt.pos) < w.seeker && lineOfSight(o.pos, tgt.pos, -3)) m.est.copy(tgt.pos);
+      aimPos = m.est; aimVel = _vr.set(0, 0, 0);
+    } else if (w.guidance === 'gnd') {
+      // ---- TV / IR / radar guided air-to-ground and anti-ship missiles ----
+      if (tgt && tgt.alive && !m.lost) {
+        if (lineOfSight(m.pos, tgt.pos, -4)) { m.maskT = 0; m.est.copy(tgt.pos); m.estVel.copy(tgt.vel || _vr.set(0, 0, 0)); }
+        else if ((m.maskT = (m.maskT || 0) + dt) > 1.5) m.lost = true;
+      } else m.est.addScaledVector(m.estVel, dt);
+      aimPos = m.est; aimVel = m.estVel;
+      if (w.cls === 'ashm') {
+        const hd = Math.hypot(m.est.x - m.pos.x, m.est.z - m.pos.z);
+        if (hd > 3500) { aimPos = _aim.set(m.est.x, Math.max(16, groundHeight(m.pos.x, m.pos.z) + 16), m.est.z); }   // sea-skim, pop up at the end
+      }
+    } else if (w.guidance === 'arm') {
+      // ---- anti-radiation: homes on the radar's emissions. If the radar goes quiet it flies to
+      // where the emitter last was, with some error (shutting down is the classic defence) ----
+      if (tgt && tgt.alive && tgt.radarMode > 0) { m.est.copy(tgt.pos); m.armErr = null; }
+      else if (!m.armErr) {
+        const far = m.pos.distanceTo(m.est) > 3000;
+        m.armErr = new THREE.Vector3((Math.random() - 0.5) * (far ? 70 : 16), 0, (Math.random() - 0.5) * (far ? 70 : 16));
+        m.est.add(m.armErr);
+      }
+      aimPos = m.est; aimVel = _vr.set(0, 0, 0);
+      const dEst = m.pos.distanceTo(m.est);
+      if (dEst > 12000 && m.t > 1.5) loft = clamp((dEst - 12000) / 18000, 0, 1) * 0.8;
+    } else if (w.guidance === 'ir') {
       // ---- infrared: tracks the hottest thing in view; flares can steal it ----
       if (!m.lost) {
         if (m.decoy) {
@@ -427,7 +520,8 @@ export class Combat {
       if (loft > 0 && vhat.y < 0.45) _acmd.y += loft * 45;               // loft into thin air on long shots
       _acmd.addScaledVector(vhat, -_acmd.dot(vhat));
       const q = 0.5 * rho * sp * sp;
-      let maxA = w.maxG * GRAV * Math.min(1, q / 160000);               // fin authority scales with dynamic pressure
+      let maxA = w.maxG * GRAV * Math.min(1, q / (w.cls === 'gbomb' ? 30000 : 160000));   // fin authority scales with dynamic pressure
+      if (w.glide && w.cls === 'gbomb') maxA *= w.glide;
       if (w.tv && m.burning) maxA = Math.max(maxA, w.maxG * GRAV * 0.7); // thrust vectoring works at any speed while burning
       if (m.t < 0.25) maxA *= 0.3;                                       // clear the aircraft first
       const aLen = _acmd.length();
@@ -443,6 +537,15 @@ export class Combat {
     this.placeMissileMesh(m);
     if (m.burning) for (let s = 1; s <= 3; s++) this.effects.missileTrail(_tmp2.copy(m.prev).lerp(m.pos, s / 3), m.vel, true, m.key, w.ramjet && m.stage > 0 ? 0.08 : w.smoke);
 
+    // ---- air-to-ground: hitting a vehicle, a building or a ship's hull ----
+    if (w.ag && m.t > 0.2) {
+      for (const u of this.units) {
+        if (!u.alive || u.side === (m.owner && m.owner.side)) continue;
+        if (Math.abs(m.pos.x - u.pos.x) > u.r + 60 || Math.abs(m.pos.z - u.pos.z) > u.r + 60) continue;
+        if (hitsUnit(m.prev, m.pos, u, w.fuze * 0.5)) return this.agImpact(m, m.pos.clone(), u);
+      }
+    }
+
     // ---- proximity fuze ----
     if (tgt && tgt.alive && m.t > w.armT) {
       const r0 = _tmp.copy(m.prev).sub(tgt.prevPos);
@@ -451,16 +554,18 @@ export class Combat {
       const d = pointSegDist(r0, r1, info);
       if (d < w.fuze) {
         const pos = m.prev.clone().lerp(m.pos, info.t);
+        if (w.ag) return this.agImpact(m, pos, tgt.unit ? tgt : null);
         const core = w.fuze * 0.4;
         const dmg = d < core ? w.dmg : Math.max(20, w.dmg * (1 - 0.75 * (d - core) / (w.fuze - core)));
         this.effects.explosion(pos, tgt.vel, false);
         this.audio?.explosion(pos, false);
-        this.hooks.onDamage(tgt, dmg, 'msl', m.owner, pos);
+        this.hooks.onDamage(tgt, dmg, 'msl', m.owner, pos, tgt.quat ? blastZone(tgt, pos) : null);
         return { exploded: true, pos };
       }
     }
     if (m.decoy && m.pos.distanceTo(m.decoy.pos) < 12) m.lost = true;
     if (m.pos.y < groundHeight(m.pos.x, m.pos.z)) {
+      if (w.ag) { const p = m.pos.clone(); p.y = groundHeight(p.x, p.z); return this.agImpact(m, p, null); }
       this.effects.explosion(m.pos, _tmp.set(0, 0, 0), false);
       return { exploded: true, pos: m.pos.clone() };
     }
@@ -471,6 +576,16 @@ export class Combat {
       return { exploded: true, pos: m.pos.clone() };
     }
     return null;
+  }
+
+  // A bomb, rocket or missile goes off on the ground or against a target: blast damage around it.
+  agImpact(m, pos, direct) {
+    const w = m.w, big = w.dmg >= 200;
+    this.effects.explosion(pos, _tmp.set(0, 0, 0), big);
+    if (pos.y < 1.5 && groundHeight(pos.x, pos.z) <= 0.5) this.effects.splash(pos, big ? 2.5 : 1.2); else this.effects.dust(pos, big ? 2.5 : 1);
+    this.audio?.explosion(pos, big);
+    if (this.hooks.onBlast) this.hooks.onBlast(pos, w, m.owner, direct);
+    return { exploded: true, pos };
   }
 
   updateTracers() {

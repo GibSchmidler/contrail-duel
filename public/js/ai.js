@@ -4,7 +4,8 @@
 // range), plus orders from the scenario (hunt, patrol, escort, ambush, target drone).
 import * as THREE from 'three';
 import { computeLeadDir, airDensity } from './flight.js';
-import { WEAPONS, firstOf, countOf, flyout, launchZone } from './arsenal.js';
+import { WEAPONS, firstOf, countOf, flyout, launchZone, agKinds } from './arsenal.js';
+import { impactPoint } from './strike.js';
 import { groundHeight, lineOfSight, ARENA_RADIUS, visRange } from './world.js';
 import { aiDefault } from './scenario.js';
 
@@ -87,6 +88,23 @@ export class AIPilot {
     this.fear = 0; this.broken = false; this.rtb = false; this.lastHp = 100; this.friendsAlive = null; this.enemiesAlive = null;
     this.committed = false; this.lostT = 0; this.extendT = 0; this.salvoLeft = 0; this.sayT = 0; this.mode = 'search';
     this.plane.radarSilent = false;
+    this.routeI = 0; this.agTgt = null; this.agPhase = null; this.agCd = 0; this.diving = false; this.command = this.command || null;
+    this.out.agKey = null; this.out.agTgt = null; this.out.land = false; this.out.gear = false;
+  }
+  // Rearmed and launched from the carrier: back to its orders with a clear head.
+  relaunched() { this.rtb = false; this.broken = false; this.fear = 0; this.lastHp = this.plane.hp; this.agTgt = null; this.agPhase = null; if (this.command && this.command.type === 'rtb') this.command = null; }
+
+  // Orders from a human flight lead over the radio.
+  //  attack: shoot my target · cover: escort me · rejoin: formation, don't engage · ground: attack ground targets
+  //  rtb: go home (land and rearm on the carrier if there is one) · hold / free: weapons hold / free
+  order(type, leader, tgt) {
+    if (type === 'free') { this.holdFire = false; return; }
+    if (type === 'hold') { this.holdFire = true; return; }
+    if (type === 'rtb') { this.rtb = true; this.broken = true; }
+    else if (this.command && this.command.type === 'rtb') { this.rtb = false; this.broken = false; this.fear = Math.min(this.fear, 0.3); }
+    this.command = { type, leader, tgt: tgt || null };
+    if (type === 'attack' && tgt) { this.target = tgt; this.hist.length = 0; }
+    if (type === 'ground') { this.agTgt = tgt && tgt.unit ? tgt : null; this.agPhase = null; }
   }
 
   say(ctx, text) { if (ctx.say && this.sayT <= 0) { ctx.say(text); this.sayT = 6; } }
@@ -94,6 +112,8 @@ export class AIPilot {
   // Choose whom to fight among the enemies this jet knows about (own sensors + datalink picture).
   pickTarget(enemies, picture, ctx = {}) {
     const P = this.plane, A = this.A, vis = visRange();
+    const cmd = this.command;
+    if (cmd && cmd.type === 'attack' && cmd.tgt && cmd.tgt.alive && enemies.includes(cmd.tgt)) { this.target = cmd.tgt; return cmd.tgt; }
     const score = (e) => {
       const c = picture && picture.get(e);
       if (!c) return 1e12;
@@ -238,6 +258,189 @@ export class AIPilot {
     return true;
   }
 
+  // ---------- carrier recovery: fly the approach, gear down, and let the deck crew catch it ----------
+  approach(carrier, o) {
+    const P = this.plane, u = carrier, D = u.D.deck;
+    const SLOPE = Math.tan(0.061);                                    // 3.5 degree glideslope
+    const td = u.fromDeck(-D.len / 2 + 55, 0, _u);                    // touchdown point on the deck
+    const back = _t.set(-Math.sin(u.hdgR), 0, Math.cos(u.hdgR));     // astern
+    const q = u.toDeck(P.pos);
+    const behind = (-D.len / 2 + 55) - q.along;                       // metres short of the touchdown point
+    const fwdAlong = -(P.fwd.x * back.x + P.fwd.z * back.z);
+    if (this.onFinal && (behind < -40 || Math.abs(q.across) > 150 + Math.max(0, behind) * 0.1 || fwdAlong < 0.55)) {
+      this.onFinal = false; this.waveT = 8;                            // waved off: go round again
+    }
+    this.waveT = (this.waveT || 0) - 1 / 60;
+    let goal;
+    if (!this.onFinal) {
+      if (behind > 2500 && Math.abs(q.across) < behind * 0.22 && fwdAlong > 0.8 && this.waveT <= 0) this.onFinal = true;
+      else {
+        // fly out to the extended centerline astern, then turn in along it
+        goal = _d.copy(td).addScaledVector(back, 7000); goal.y = td.y + 450;
+        if (behind > 6000 || Math.hypot(P.pos.x - goal.x, P.pos.z - goal.z) < 2000) {
+          // at the initial point: point up the centerline toward the ship
+          goal.copy(td).addScaledVector(back, Math.max(0, behind - 2500)); goal.y = td.y + SLOPE * Math.max(0, behind - 2500) + 40;
+        }
+      }
+    }
+    if (this.onFinal) {
+      // a carrot on the centerline and the glideslope a little ahead
+      const look = clamp(behind * 0.3, 200, 1400);
+      const cd = Math.max(0, behind - look);
+      goal = _d.copy(td).addScaledVector(back, cd); goal.y = td.y + SLOPE * cd + 2;
+    }
+    // steer the flight path (not the nose) at the goal: add back the angle of attack
+    const dir = _aim.copy(goal).sub(P.pos).normalize();
+    _tv.copy(P.vel).normalize();
+    dir.add(_lead.copy(P.fwd).sub(_tv)).normalize();
+    steer(P, dir, 0.6, o);
+    const want = this.onFinal ? 76 : 125;
+    o.throttle = clamp(0.5 + (want - P.speed) * 0.05, 0.1, 1.0);
+    o.airbrake = P.speed > want + 25;
+    o.gear = this.onFinal || behind < 9000 && Math.abs(q.across) < 4000;
+    o.flaps = this.onFinal ? 1 : P.speed < 135 ? 0.5 : 0;
+    o.wantStt = false;
+    // over the deck and nearly down: the AI's trap is assisted from here
+    if (this.onFinal && u.onDeck(P.pos) && q.y < 25 && Math.abs(q.across) < 30 && P.speed < 110) o.land = true;
+    this.mode = 'recover';
+    return o;
+  }
+
+  // ---------- ground attack ----------
+  strike(dt, ctx, o, keys) {
+    const P = this.plane, A = this.A;
+    const targets = (ctx.ground || []).filter((u) => u.alive);
+    if (!targets.length) return false;
+    // what can each store hit?
+    const can = (key, u) => { const c = WEAPONS[key].cls; return c === 'arm' ? !!u.radarT : c === 'ashm' ? u.D.ship : !u.D.ship || c !== 'rkt'; };
+    let key = this.agKey && keys.includes(this.agKey) ? this.agKey : null;
+    if (!this.agTgt || !this.agTgt.alive || (key && !can(key, this.agTgt))) {
+      // nearest useful target (prefer what it was told to hit, then air defences that threaten it)
+      let best = null, bs = 1e12;
+      for (const u of targets) {
+        const k = keys.find((kk) => can(kk, u));
+        if (!k) continue;
+        const wc = WEAPONS[k].cls;
+        let sc = u.pos.distanceTo(P.pos) * (ctx.priority && ctx.priority.has(u.id) ? 0.3 : 1);
+        // ARMs and stand-off weapons go for air defences first; bombs and rockets leave the
+        // long-range SAM batteries alone (that's a job for the SEAD jets) and avoid the guns
+        if (wc === 'arm' || wc === 'agm') sc *= u.D.cat === 'sam' ? 0.5 : 1;
+        else if (wc === 'bomb' || wc === 'rkt' || wc === 'gbomb') sc *= u.D.cat === 'sam' && u.D.radar && u.D.radar.range > 25000 ? 4 : u.D.cat === 'sam' || u.D.cat === 'aaa' ? 1.4 : 1;
+        if (sc < bs) { bs = sc; best = u; key = k; }
+      }
+      this.agTgt = best; this.agPhase = 'ingress';
+      if (best) this.say(ctx, `Rolling in on the ${best.name}.`);
+    }
+    const T = this.agTgt;
+    if (!T) return false;
+    key = key && can(key, T) ? key : keys.find((k) => can(k, T));
+    if (!key) { this.agTgt = null; return false; }
+    this.agKey = key;
+    const w = WEAPONS[key];
+    o.weapon = 'ag'; o.agKey = key; o.agTgt = T; o.wantStt = false;
+    this.mode = 'strike';
+    _t.copy(T.pos).sub(P.pos);
+    const hd = Math.hypot(_t.x, _t.z), dist = _t.length();
+    const los = _t.divideScalar(dist || 1);
+    const off = Math.acos(clamp(los.dot(P.fwd), -1, 1));
+    if (this.agPhase === 'egress') {
+      this.diving = false;
+      // weapon away: turn off the target and climb out of the SAM envelope, then come back around
+      this.agCd -= dt;
+      _d.copy(P.pos).sub(T.pos); _d.y = 0; _d.normalize(); _d.y = 0.25; _d.normalize();
+      steer(P, _d, A.maxPull, o); o.throttle = 1.15;
+      if (this.agCd <= 0) { this.agPhase = 'ingress'; if (!T.alive) this.agTgt = null; }
+      return true;
+    }
+    const cruise = Math.max(groundHeight(P.pos.x, P.pos.z) + 1800, w.cls === 'bomb' || w.cls === 'rkt' ? 3000 : w.cls === 'ashm' ? 1200 : 5000);
+    let release = false;
+    switch (w.cls) {
+      case 'arm': case 'ashm': {
+        const rng = w.cls === 'arm' ? w.seeker * 0.75 : 32000;
+        _d.copy(los); _d.y = clamp((cruise - P.pos.y) / 3000, -0.3, 0.3);
+        steer(P, _d.normalize(), 0.7, o); o.throttle = 1.0;
+        release = dist < rng && off < 0.35 && (w.cls !== 'arm' || T.radarMode > 0);
+        break;
+      }
+      case 'agm': {
+        if (hd > 11000) { _d.copy(los); _d.y = clamp((cruise - P.pos.y) / 3000, -0.3, 0.3); steer(P, _d.normalize(), 0.7, o); }
+        else steer(P, los, 0.6, o);
+        o.throttle = 1.0;
+        release = P.agLocked && dist < w.seeker * 0.85;
+        break;
+      }
+      case 'gbomb': {
+        _d.copy(los); _d.y = 0; _d.normalize(); _d.y = clamp((cruise - P.pos.y) / 3000, -0.3, 0.3);
+        steer(P, _d.normalize(), 0.6, o); o.throttle = 1.05;
+        const ip = impactPoint(P, key);
+        const glide = w.glide ? 1 + w.glide * 1.2 : 1;
+        if (ip) release = ip.pos.distanceTo(T.pos) < 900 * glide || (hd < (P.pos.y - T.pos.y) * 1.6 * glide && off < 0.5 && hd > 1000);
+        break;
+      }
+      default: {
+        // iron bombs and rockets: approach at height, roll in once the target is ~25-30 degrees
+        // below the nose, then steer the flight path so the CCIP pipper slides onto the target
+        const rk = w.cls === 'rkt';
+        const dh = P.pos.y - T.pos.y, dep = Math.atan2(dh, hd);
+        const tol = (rk ? 40 : 22) * (1.6 - A.s.gun);
+        if (!this.diving && dep >= (rk ? 0.3 : 0.45)) {
+          if (off < 0.6 && P.vel.y < 40 && dep < 1.0) this.diving = true;
+          else if (dep >= 1.0 && off < 1.0) { this.agPhase = 'egress'; this.agCd = 6; }   // on top of it: extend and come round
+          // otherwise keep turning toward it until it's ahead
+        }
+        if (this.agPhase === 'egress') break;
+        if (!this.diving) {
+          const top = T.pos.y + (rk ? 1500 : 2600);
+          _d.copy(los); _d.y = 0; _d.normalize(); _d.y = clamp((Math.max(cruise, top) - P.pos.y) / 2000, -0.3, 0.35);
+          steer(P, _d.normalize(), 0.7, o); o.throttle = 1.0;
+          // level release if the pipper happens to cross the target on the way in
+          if (!rk && hd < 9000) { const ip = impactPoint(P, key); release = !!ip && ip.pos.distanceTo(T.pos) < tol; }
+        } else {
+          const ip = impactPoint(P, key);
+          const vh = _u.copy(P.vel).normalize();
+          // where the flight path meets the ground at the target's height
+          if (vh.y < -0.05) _aim.copy(P.pos).addScaledVector(vh, dh / -vh.y); else _aim.copy(T.pos);
+          let err = 1e9;
+          if (ip) { _tv.copy(T.pos).sub(ip.pos); _tv.y = 0; err = _tv.length(); _aim.addScaledVector(_tv, 2.2); }   // over-correct: the pipper lags the flight path
+          _aim.y = T.pos.y;
+          _aim.sub(P.pos).normalize();
+          steer(P, _aim, 0.8, o); o.throttle = rk ? 0.8 : 0.9;
+          o.airbrake = P.speed > 270;
+          release = !!ip && err < tol && dist < (rk ? 3500 : 6500);
+          if (!release && (P.pos.y - groundHeight(P.pos.x, P.pos.z) < A.minAgl + 300 || hd < 400 || off > 1.2)) { this.agPhase = 'egress'; this.agCd = 10; this.diving = false; }
+        }
+      }
+    }
+    if (this.ripple > 0 && (w.cls === 'bomb' || w.cls === 'rkt')) release = true;   // rest of the pair / ripple
+    if (release && this.agCd2 <= 0 && !this.holdFire) {
+      o.missile = true;
+      this.agCd2 = w.cls === 'rkt' ? 0.1 : w.cls === 'bomb' ? 0.26 : 1.2;
+      this.agShots = (this.agShots || 0) + 1;
+      this.ripple = (w.cls === 'bomb' && this.agShots < 2) || (w.cls === 'rkt' && this.agShots < 6) ? 1 : 0;
+      // rockets ripple, iron bombs go in pairs, everything else one per pass
+      if ((w.cls !== 'rkt' && w.cls !== 'bomb') || this.agShots >= (w.cls === 'rkt' ? 6 : 2)) {
+        this.agShots = 0;
+        this.agPhase = 'egress'; this.agCd = w.cls === 'arm' || w.cls === 'ashm' ? 10 : 7; this.diving = false;
+        this.say(ctx, w.cls === 'arm' ? 'Magnum!' : w.cls === 'ashm' ? 'Vampire away!' : w.cls === 'agm' ? 'Rifle!' : 'Bombs away!');
+      }
+    }
+    this.agCd2 = (this.agCd2 || 0) - dt;
+    return true;
+  }
+
+  followRoute(route, o) {
+    const P = this.plane;
+    const wp = route[this.routeI % route.length];
+    _d.set(wp[0] - P.pos.x, 0, wp[1] - P.pos.z);
+    if (_d.length() < 1500) this.routeI = (this.routeI + 1) % route.length;
+    _d.normalize();
+    _d.y = clamp(((wp[2] || 3000) - P.pos.y) / 2500, -0.5, 0.5);
+    steer(P, _d.normalize(), 0.55, o);
+    o.throttle = 0.9; o.wantStt = false;
+    this.mode = 'route';
+    return o;
+  }
+
   // ctx: { friends, enemies, picture, home (enemy area to search), base (own start), anchor (own start
   //        point at patrol altitude), lead (flight leader), idx (slot), say(text) }
   update(dt, target, combat, threat, ctx = {}) {
@@ -245,7 +448,10 @@ export class AIPilot {
     this.time += dt;
     this.missileCd -= dt; this.flareCd -= dt; this.burstT -= dt; this.supportT -= dt; this.sayT -= dt; this.extendT -= dt;
     o.gun = false; o.missile = false; o.flare = false; o.chaff = false; o.airbrake = false;
+    o.land = false; o.gear = false; o.flaps = 0; o.agKey = null; o.agTgt = null;
+    if (o.weapon === 'ag') o.weapon = 'srm';
     if (!P.alive) return o;
+    const cmd = this.command;
     this.morale(dt, threat, ctx);
     P.radarSilent = C.ord === 'ambush' && !this.committed;
 
@@ -256,7 +462,9 @@ export class AIPilot {
     const agl = P.pos.y - gAhead;
     const futureAlt = P.pos.y + P.vel.y * look;
     const floor = A.minAgl * (this.broken && A.terrain ? 0.7 : 1);
-    if (agl < floor || futureAlt < gAhead + floor * 0.55) {
+    // on final to the carrier it flies the glideslope down to the deck instead
+    const landing = this.onFinal && this.broken && ctx.carrier && ctx.carrier.alive;
+    if (!landing && (agl < floor || futureAlt < gAhead + floor * 0.55)) {
       _d.copy(P.vel); _d.y = 0; _d.normalize(); _d.y = 1.6; _d.normalize();
       steer(P, _d, 1.0, o); o.throttle = 1.2;
       return o;
@@ -273,17 +481,14 @@ export class AIPilot {
       _d.y = (3200 - P.pos.y) / 3000; _d.normalize();
       steer(P, _d, 0.5, o); o.throttle = 0.75; o.wantStt = false; this.mode = 'drone'; return o;
     }
-    if (!target || !target.alive) { // nobody left: victory lap
-      _d.copy(P.fwd); _d.y = 0.05; _d.normalize();
-      steer(P, _d, 0.4, o); o.throttle = 0.8; o.wantStt = false; return o;
-    }
+    const hasTgt = !!(target && target.alive);
 
     // ---------- what it knows: its radar track, IRST, eyes or datalink, like a human ----------
-    const trueDist = target.pos.distanceTo(P.pos);
-    const eyes = trueDist < visRange() && lineOfSight(P.pos, target.pos);
+    const trueDist = hasTgt ? target.pos.distanceTo(P.pos) : 1e9;
+    const eyes = hasTgt && trueDist < visRange() && lineOfSight(P.pos, target.pos);
     const irst = P.irst && P.irst.contact;
-    const pc = ctx.picture && ctx.picture.get(target);
-    const known = (P.radar.contact && !P.radarSilent) || eyes || irst || (pc && pc.mem > 0);
+    const pc = hasTgt && ctx.picture && ctx.picture.get(target);
+    const known = hasTgt && ((P.radar.contact && !P.radarSilent) || eyes || irst || (pc && pc.mem > 0));
     if (known) {
       const src = eyes ? target : P.radar.contact ? P.radar : irst ? P.irst : pc || target;
       this.perceive(src.pos, src.vel);
@@ -306,7 +511,7 @@ export class AIPilot {
     if (tPos && this.noticeT <= 0 && tDist < defendAt) {
       this.mode = 'defend';
       // a trained pilot with a shot of its own takes it before turning away
-      if (radarThreat && tDist > 9000 && A.s.tac >= 0.4 && this.counterShot(dt, target, ctx, o)) return o;
+      if (hasTgt && radarThreat && tDist > 9000 && A.s.tac >= 0.4 && this.counterShot(dt, target, ctx, o)) return o;
       if (this.defendingId !== tKind) { this.defendingId = tKind; this.willFlare = Math.random() < A.flareP; this.willNotch = Math.random() < A.notch; }
       const los = _aim.copy(P.pos).sub(tPos).normalize();
       if (radarThreat && A.drag && tDist > 9000) {
@@ -342,13 +547,20 @@ export class AIPilot {
 
     // ---------- out of weapons: go home ----------
     const nM = countOf(P.stores, 'mrm'), nS = countOf(P.stores, 'srm');
-    const noMissiles = nM + nS === 0 || C.wpn === 'guns' || C.wpn === 'hold';
-    const noGun = P.gunAmmo <= 0 || P.gunT.rate <= 0 || C.wpn === 'hold';
-    if (!this.rtb && C.wpn !== 'hold' && ((noMissiles && noGun) || (nM + nS === 0 && (A.style === 'bvr' || A.s.nerve < 0.4)))) {
-      this.rtb = true; this.broken = true; this.say(ctx, 'Winchester, heading home.');
+    const agKeys = agKinds(P.stores);
+    const strikeJob = (C.ord === 'strike' || (cmd && cmd.type === 'ground')) && agKeys.length > 0 && (ctx.ground || []).some((u) => u.alive);
+    const wpn = this.holdFire ? 'hold' : C.wpn;
+    const noMissiles = nM + nS === 0 || wpn === 'guns' || wpn === 'hold';
+    const noGun = P.gunAmmo <= 0 || P.gunT.rate <= 0 || wpn === 'hold';
+    if (!this.rtb && wpn !== 'hold' && !strikeJob && ((noMissiles && noGun) || (nM + nS === 0 && (A.style === 'bvr' || A.s.nerve < 0.4 || ctx.carrier)))) {
+      this.rtb = true; this.broken = true; this.say(ctx, ctx.carrier ? 'Winchester, returning to the boat.' : 'Winchester, heading home.');
     }
+    // badly damaged with a carrier nearby: go and get fixed
+    if (!this.rtb && ctx.carrier && P.hp < 35) { this.rtb = true; this.broken = true; this.say(ctx, 'Hit bad, returning to the boat.'); }
 
-    // ---------- broken off: run for home, low if it knows how to use the terrain ----------
+    // ---------- broken off: land on the carrier, or run for home ----------
+    if (this.broken && ctx.carrier && ctx.carrier.alive) return this.approach(ctx.carrier, o);
+    this.onFinal = false;
     if (this.broken) {
       this.mode = 'bugout';
       const base = ctx.base || _u.set(0, 0, 0);
@@ -364,10 +576,30 @@ export class AIPilot {
       return o;
     }
 
+    // ---------- radio commands from the flight lead ----------
+    if (cmd && cmd.leader && cmd.leader.alive) {
+      if (cmd.type === 'rejoin') { this.mode = 'escort'; this.formation(cmd.leader, ctx.idx || 1, o); return o; }
+      if (cmd.type === 'cover' && (!known || trueDist > 9000 || (target.lockTgt !== cmd.leader && target.pos.distanceTo(cmd.leader.pos) > 9000))) { this.mode = 'escort'; this.formation(cmd.leader, ctx.idx || 1, o); return o; }
+    }
+    // ---------- strike: go after ground targets unless a fighter is right on top of it ----------
+    if (strikeJob && !(known && trueDist < 6000 && countOf(P.stores, 'srm') + nM > 0) && this.strike(dt, ctx, o, agKeys)) return o;
+    if (!hasTgt) {
+      // nobody left in the air
+      if (ctx.route && ctx.route.length && C.ord === 'route') return this.followRoute(ctx.route, o);
+      if (ctx.anchor) { this.mode = 'patrol'; this.orbit(ctx.anchor, 5000, Math.max(2500, ctx.anchor.y), o, 0.8); return o; }
+      _d.copy(P.fwd); _d.y = 0.05; _d.normalize();
+      steer(P, _d, 0.4, o); o.throttle = 0.8; o.wantStt = false; return o;
+    }
+
     // ---------- orders: when to commit to the fight ----------
     const ord = C.ord, commit = C.commit * 1000;
     const lead = ctx.lead && ctx.lead !== P && ctx.lead.alive ? ctx.lead : null;
     let engaged = true;
+    if (ord === 'route' && ctx.route && ctx.route.length) {
+      if (!this.committed && known && trueDist < commit) { this.committed = true; this.say(ctx, 'Committing.'); }
+      if (this.committed && (trueDist > commit * 1.5 || this.lostT > 15)) this.committed = false;
+      if (!this.committed) return this.followRoute(ctx.route, o);
+    }
     if (ord === 'cap' && ctx.anchor) {
       const dA = (known ? _tp : target.pos).distanceTo(ctx.anchor);
       if (!this.committed && known && dA < commit) { this.committed = true; this.say(ctx, 'Committing.'); }
@@ -416,7 +648,7 @@ export class AIPilot {
     o.throttle = 1.0;
 
     // weapon choice by range, rules of engagement and preferred style
-    const mrmOk = nM > 0 && C.wpn === 'all', srmOk = nS > 0 && (C.wpn === 'all' || C.wpn === 'nobvr');
+    const mrmOk = nM > 0 && wpn === 'all', srmOk = nS > 0 && (wpn === 'all' || wpn === 'nobvr');
     o.weapon = mrmOk && (dist > (A.closeIn ? 12000 : 4500) || !srmOk) ? 'mrm' : 'srm';
     o.wantStt = !P.radarSilent && dist < 30000 && (o.weapon === 'mrm' || dist < 9000);
     if (this.supportT > 0) o.wantStt = true;
@@ -468,7 +700,7 @@ export class AIPilot {
     steer(P, _aim, maxPull, o);
 
     // ---------- weapons ----------
-    if (C.wpn === 'hold') return o;
+    if (wpn === 'hold') return o;
     const aimErr = Math.acos(clamp(_lead.dot(P.fwd), -1, 1));
     const headOn = closing > 350 && -target.fwd.dot(losDir) > 0.8;
     if ((!headOn || A.headOnGun) && dist < A.gunRange && aimErr < A.aimTol + 2.2 / Math.max(dist, 50) && P.gunAmmo > 0) this.burstT = A.burst * (0.6 + Math.random() * 0.8);
@@ -480,7 +712,7 @@ export class AIPilot {
       const fd = _t.length();
       if (fd < dist + 200 && _t.dot(P.fwd) / Math.max(fd, 1) > Math.cos(0.12)) { o.gun = false; this.burstT = 0; break; }
     }
-    if (C.wpn === 'guns' || this.missileCd > 0 || P.weapon !== o.weapon) return o;
+    if (wpn === 'guns' || this.missileCd > 0 || P.weapon !== o.weapon) return o;
     const sKey = firstOf(P.stores, 'srm'), mKey = firstOf(P.stores, 'mrm');
     if (o.weapon === 'srm' && srmOk && P.locked && dist > 500 && dist < WEAPONS[sKey].seeker * (A.s.agg > 0.7 ? 0.65 : 0.5)) {
       o.missile = true; this.missileCd = A.mslCd * (0.7 + Math.random() * 0.6);

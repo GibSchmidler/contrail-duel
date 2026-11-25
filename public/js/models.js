@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { jetOf, DEFAULT_JET } from './aircraft.js';
 import { MODELS } from './models_jets.js';
+import { drawArt } from './noseart.js';
 
 const PI = Math.PI;
 
@@ -216,6 +217,53 @@ const MSL = {
   micair:  { len: 3.1, r: 0.08, tail: [0.25, 0.28], mid: [0.06, 1.6], nose: 0x7a6a3a, body: 0xe2e2de },
   micaem:  { len: 3.1, r: 0.08, tail: [0.25, 0.28], mid: [0.06, 1.6], nose: 0xd8d8d0, body: 0xe2e2de },
   meteor:  { len: 3.65, r: 0.089, tail: [0.32, 0.35], intakes: true, nose: 0xd8d8d0, body: 0xe6e6e2 },
+  // air-to-ground: bombs are olive drab with a yellow band; pods are blunt tubes
+  mk82:    { len: 2.2, r: 0.14, bomb: true, tail: [0.22, 0.35], nose: 0x4a5236, body: 0x4f5739 },
+  ofab250: { len: 2.1, r: 0.16, bomb: true, tail: [0.2, 0.3], nose: 0x3d4a34, body: 0x44523a },
+  gb250:   { len: 2.1, r: 0.15, bomb: true, tail: [0.2, 0.3], nose: 0x4a5236, body: 0x56604a },
+  gbu12:   { len: 3.3, r: 0.14, bomb: true, tail: [0.38, 0.45], canard: [0.12, 0.3], nose: 0x8a8a80, body: 0x4f5739 },
+  gbu38:   { len: 2.4, r: 0.14, bomb: true, tail: [0.22, 0.4], mid: [0.05, 0.8], nose: 0x4f5739, body: 0x4f5739 },
+  kab500:  { len: 3.05, r: 0.2, bomb: true, tail: [0.3, 0.45], canard: [0.14, 0.3], nose: 0xb8b8b0, body: 0x7b8a78 },
+  ls6:     { len: 3.0, r: 0.18, bomb: true, tail: [0.24, 0.4], mid: [0.9, 0.35], nose: 0x8a9086, body: 0x8a9086 },
+  pw4:     { len: 3.0, r: 0.13, bomb: true, tail: [0.36, 0.4], canard: [0.1, 0.25], nose: 0x8a8a80, body: 0x6a7060 },
+  hammer:  { len: 3.1, r: 0.14, bomb: true, tail: [0.3, 0.4], mid: [0.28, 0.5], nose: 0xb5b5ae, body: 0x8a8e88 },
+  agm65:   { len: 2.5, r: 0.15, tail: [0.18, 0.4], mid: [0.28, 1.1], nose: 0x2a2a2a, body: 0xd8d8d2 },
+  kh29t:   { len: 3.9, r: 0.2, tail: [0.24, 0.4], mid: [0.32, 0.9], canard: [0.16, 0.3], nose: 0x2a2a2a, body: 0xc0c4bc },
+  akd10:   { len: 1.8, r: 0.09, tail: [0.12, 0.2], canard: [0.08, 0.15], nose: 0x2a2a2a, body: 0xd0d0ca },
+  brim:    { len: 1.8, r: 0.09, tail: [0.12, 0.25], nose: 0x3a3a3a, body: 0xd8d8d2 },
+  agm88:   { len: 4.17, r: 0.13, tail: [0.3, 0.35], mid: [0.3, 0.9], nose: 0xd8d8d0, body: 0xe2e2dc },
+  kh31p:   { len: 4.7, r: 0.18, tail: [0.3, 0.4], mid: [0.25, 0.8], intakes: true, nose: 0xd0d0c8, body: 0xd5d8d0 },
+  yj91:    { len: 4.7, r: 0.18, tail: [0.3, 0.4], mid: [0.25, 0.8], intakes: true, nose: 0xd0d0c8, body: 0xd5d5cf },
+  alarm:   { len: 4.3, r: 0.11, tail: [0.24, 0.3], mid: [0.25, 0.8], nose: 0xd8d8d0, body: 0xe2e2dc },
+  agm84:   { len: 3.85, r: 0.17, tail: [0.26, 0.35], mid: [0.35, 0.6], nose: 0x3a3a3a, body: 0xd8d8d2 },
+  kh35:    { len: 4.4, r: 0.21, tail: [0.24, 0.35], mid: [0.32, 0.6], nose: 0x3a3a3a, body: 0xc8ccc4 },
+  yj83:    { len: 5.0, r: 0.18, tail: [0.26, 0.4], mid: [0.32, 0.7], nose: 0x3a3a3a, body: 0xc8ccc4 },
+  exocet:  { len: 4.7, r: 0.18, tail: [0.26, 0.4], mid: [0.32, 0.7], nose: 0x3a3a3a, body: 0xd8d8d2 },
+  hydra:   { len: 1.7, r: 0.21, pod: true, nose: 0x50574a, body: 0x50574a },
+  s8:      { len: 2.75, r: 0.26, pod: true, nose: 0xa0a59a, body: 0xa0a59a },
+  hf90:    { len: 2.3, r: 0.24, pod: true, nose: 0x8a9086, body: 0x8a9086 },
+  sneb:    { len: 2.0, r: 0.2, pod: true, nose: 0xb0b2aa, body: 0xb0b2aa },
+  rocket:  { len: 1.4, r: 0.04, tail: [0.08, 0.1], nose: 0x5a5a52, body: 0xcfcfc8 },
+  // surface-to-air
+  pac2:    { len: 5.3, r: 0.2, tail: [0.42, 0.6], nose: 0xd8d8d0, body: 0xe2e2dc },
+  sm2:     { len: 4.7, r: 0.17, tail: [0.38, 0.5], mid: [0.12, 1.6], nose: 0xd8d8d0, body: 0xe2e2dc },
+  s300:    { len: 7.5, r: 0.26, tail: [0.42, 0.6], nose: 0xd8d8d0, body: 0xcfd1cc },
+  buk:     { len: 5.5, r: 0.2, tail: [0.42, 0.6], mid: [0.18, 1.4], nose: 0xd8d8d0, body: 0xcfd1cc },
+  tor:     { len: 2.9, r: 0.12, tail: [0.3, 0.3], canard: [0.16, 0.2], nose: 0xd8d8d0, body: 0xcfd1cc },
+  pantsir: { len: 3.2, r: 0.09, tail: [0.2, 0.25], nose: 0x6a7260, body: 0x6a7260 },
+  hq9:     { len: 6.8, r: 0.24, tail: [0.42, 0.6], nose: 0xd8d8d0, body: 0xd4d4ce },
+  hq16:    { len: 5.2, r: 0.2, tail: [0.4, 0.55], mid: [0.16, 1.3], nose: 0xd8d8d0, body: 0xd4d4ce },
+  hq7:     { len: 3.0, r: 0.08, tail: [0.24, 0.25], canard: [0.12, 0.2], nose: 0xd8d8d0, body: 0xd4d4ce },
+  redut:   { len: 4.75, r: 0.12, tail: [0.3, 0.4], nose: 0xd8d8d0, body: 0xcfd1cc },
+  aster30: { len: 4.9, r: 0.09, tail: [0.24, 0.4], mid: [0.06, 1.4], nose: 0xd8d8d0, body: 0xe2e2de },
+  aster15: { len: 4.2, r: 0.09, tail: [0.24, 0.4], mid: [0.06, 1.4], nose: 0xd8d8d0, body: 0xe2e2de },
+  slamraam:{ len: 3.66, r: 0.089, tail: [0.42, 0.32], mid: [0.32, 0.5], nose: 0xd8d8d0 },
+  iristsl: { len: 3.5, r: 0.08, tail: [0.25, 0.25], canard: [0.08, 0.5], nose: 0x5a4a30, body: 0xe0e0dc },
+  sea_sparrow: { len: 3.7, r: 0.1, tail: [0.3, 0.3], mid: [0.08, 1.2], nose: 0xd8d8d0, body: 0xe2e2dc },
+  stinger: { len: 1.5, r: 0.035, tail: [0.08, 0.1], canard: [0.04, 0.06], nose: 0x2a2a2a, body: 0x6a7260 },
+  igla:    { len: 1.6, r: 0.036, tail: [0.08, 0.1], canard: [0.04, 0.06], nose: 0x2a2a2a, body: 0x6a7260 },
+  qw2:     { len: 1.5, r: 0.036, tail: [0.08, 0.1], canard: [0.04, 0.06], nose: 0x2a2a2a, body: 0x6a7260 },
+  mistral: { len: 1.8, r: 0.045, tail: [0.08, 0.12], canard: [0.04, 0.06], nose: 0x2a2a2a, body: 0xd0d0ca },
 };
 const _mslMat = new Map();
 const mslMat = (hex) => { if (!_mslMat.has(hex)) _mslMat.set(hex, new THREE.MeshStandardMaterial({ color: hex, roughness: 0.5, metalness: 0.2 })); return _mslMat.get(hex); };
@@ -226,11 +274,22 @@ export function buildMissileMesh(key = 'aim9x') {
   const R = d.r * 1.7, L = d.len; // slightly oversized so they read at a distance
   const body = new THREE.CylinderGeometry(R, R, L, 8); body.rotateX(PI / 2);
   g.add(new THREE.Mesh(body, white));
-  const cl = d.r > 0.09 ? 0.6 : 0.34;
-  const cone = new THREE.ConeGeometry(R, cl, 8); cone.rotateX(-PI / 2); cone.translate(0, 0, -L / 2 - cl / 2);
+  if (d.pod) {
+    // rocket pod: a blunt tube with a ring of rocket noses at the front
+    const front = new THREE.CylinderGeometry(R * 0.92, R * 0.92, 0.06, 10); front.rotateX(PI / 2); front.translate(0, 0, -L / 2 - 0.03);
+    g.add(new THREE.Mesh(front, mslMat(0x1c1d1e)));
+    const fair = new THREE.ConeGeometry(R, 0.4, 10); fair.rotateX(PI / 2); fair.translate(0, 0, L / 2 + 0.2);
+    g.add(new THREE.Mesh(fair, white));
+    return g;
+  }
+  const cl = d.bomb ? R * 3.2 : d.r > 0.09 ? 0.6 : 0.34;
+  const cone = d.bomb ? new THREE.SphereGeometry(R, 10, 8, 0, PI * 2, 0, PI / 2) : new THREE.ConeGeometry(R, cl, 8);
+  if (d.bomb) { cone.scale(1, 2.4, 1); cone.rotateX(-PI / 2); cone.translate(0, 0, -L / 2); }
+  else { cone.rotateX(-PI / 2); cone.translate(0, 0, -L / 2 - cl / 2); }
   g.add(new THREE.Mesh(cone, nose));
-  const bandG = new THREE.CylinderGeometry(R * 1.02, R * 1.02, 0.08, 8); bandG.rotateX(PI / 2); bandG.translate(0, 0, -L * 0.18);
+  const bandG = new THREE.CylinderGeometry(R * 1.02, R * 1.02, 0.08, 8); bandG.rotateX(PI / 2); bandG.translate(0, 0, -L * (d.bomb ? 0.3 : 0.18));
   g.add(new THREE.Mesh(bandG, band));
+  if (d.bomb) { const tc = new THREE.ConeGeometry(R, R * 3, 8); tc.rotateX(PI / 2); tc.translate(0, 0, L / 2 + R * 1.5); g.add(new THREE.Mesh(tc, white)); }
   const fins = (span, chord, z, thick = 0.02) => {
     for (let i = 0; i < 4; i++) {
       const f = new THREE.BoxGeometry(thick, span, chord); f.translate(0, R + span / 2, z);
@@ -558,4 +617,31 @@ export function buildPilot() {
   chute.visible = false;
   g.add(chute);
   return { group: g, seat, man, chute };
+}
+
+// Nose art decals on both sides of the forward fuselage (j: a buildJet result).
+export function addNoseArt(j, typeKey, art) {
+  if (!art) return;
+  const M = MODELS[typeKey] || MODELS[DEFAULT_JET], F = M.fus, prof = F.prof;
+  const rAt = (z) => {
+    for (let i = 1; i < prof.length; i++) if (prof[i][1] >= z) { const [r0, z0] = prof[i - 1], [r1, z1] = prof[i]; return r0 + (r1 - r0) * ((z - z0) / Math.max(1e-6, z1 - z0)); }
+    return prof[prof.length - 1][0];
+  };
+  // just aft of the radome, below the cockpit; the decal leans in to follow the taper of the nose
+  const zt = prof[0][1], radLen = Math.min(2.4, (F.split - zt) * 0.55);
+  const len = Math.max(1.2, Math.min(1.9, rAt(zt + radLen + 1) * 2.4)), hgt = len * 0.625;
+  const zf = zt + radLen + 0.3, zb = zf + len, rf = rAt(zf) * F.sx, rb = rAt(zb) * F.sx;
+  const lean = Math.atan2(rb - rf, len);
+  for (const side of [-1, 1]) {
+    const cv = document.createElement('canvas'); cv.width = 256; cv.height = 160;
+    drawArt(cv.getContext('2d'), 256, 160, art, side > 0);
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+    const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.6, metalness: 0.1, polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(len, hgt), mat);
+    mesh.position.set(side * ((rf + rb) / 2 + 0.05), (F.y || 0) - rAt(zf + len / 2) * F.sy * 0.12, zf + len / 2);
+    mesh.rotation.y = side * (Math.PI / 2 + lean);
+    mesh.userData.part = 'nose';
+    mesh.userData.art = true;
+    j.group.add(mesh);
+  }
 }
