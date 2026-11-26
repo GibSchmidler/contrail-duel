@@ -620,5 +620,14 @@ export class World {
     this.sun.intensity = this.sunI * sunK;
     this.hemi.intensity = this.hemiI * (0.75 + 0.25 * sunK);
     this.scene.fog.density = this.baseFog * fogK;
+    // Cloud sprites always face the screen, so they would roll with the camera. Counter-rotate
+    // them so they stay upright to the horizon. Looking almost straight up or down there is no
+    // horizon to line up with, so keep the last angle instead of letting them spin.
+    if (this.cloudMats) {
+      _cup.set(0, 1, 0).applyQuaternion(_cq.copy(camera.quaternion).invert());
+      if (Math.hypot(_cup.x, _cup.y) > 0.15) this.cloudRot = Math.atan2(-_cup.x, _cup.y);
+      for (const m of this.cloudMats) m.rotation = this.cloudRot || 0;
+    }
   }
 }
+const _cup = new THREE.Vector3(), _cq = new THREE.Quaternion();
