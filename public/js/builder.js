@@ -46,9 +46,10 @@ function aiEditor(q, k, i) {
 const LOADOUT_NAMES = { '': 'Default', dogfight: 'Dogfight (if the jet has it)', bvr: 'Long range (if the jet has it)' };
 
 const mapCache = {};
-export function mapImage(key) {
-  if (mapCache[key]) return mapCache[key];
-  const P = previewHeights(key, 200), n = P.n, pal = MAPS[key].pal;
+export function mapImage(key, res = 200) {
+  const ck = res === 200 ? key : key + ':' + res;
+  if (mapCache[ck]) return mapCache[ck];
+  const P = previewHeights(key, res), n = P.n, pal = MAPS[key].pal;
   const c = document.createElement('canvas');
   c.width = c.height = n;
   const ctx = c.getContext('2d'), img = ctx.createImageData(n, n);
@@ -71,7 +72,7 @@ export function mapImage(key) {
     img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2]; img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
-  return (mapCache[key] = { canvas: c, size: P.size, heights: P });
+  return (mapCache[ck] = { canvas: c, size: P.size, heights: P, sea: `rgb(${C.deep.join(',')})` });
 }
 
 function jetOptions(sel, human, i) {

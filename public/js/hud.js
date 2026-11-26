@@ -474,6 +474,21 @@ export class Hud {
     c.save();
     c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.clip();
     c.shadowBlur = 0;
+    // terrain and coastlines, dimmed so the symbols stay readable, turned to match the heading
+    const MI = S.mapImg;
+    if (MI) {
+      const cell = MI.size / MI.canvas.width;
+      c.save();
+      c.translate(cx, cy);
+      c.transform(rx * k, -fx * k, rz * k, -fz * k, 0, 0);
+      c.translate(-P.pos.x - MI.size / 2, -P.pos.z - MI.size / 2);
+      c.scale(cell, cell);
+      c.globalAlpha = 0.5; c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
+      c.fillStyle = MI.sea; c.fillRect(-MI.canvas.width, -MI.canvas.width, MI.canvas.width * 3, MI.canvas.width * 3);  // open sea past the edge
+      c.drawImage(MI.canvas, 0, 0);
+      c.restore();
+      c.fillStyle = 'rgba(0,16,6,0.25)'; c.fillRect(cx - R, cy - R, 2 * R, 2 * R);
+    }
     c.strokeStyle = 'rgba(157,255,184,0.2)'; c.beginPath(); c.arc(cx, cy, R / 2, 0, Math.PI * 2); c.stroke();
     // radar coverage: the scan volume ahead of the nose
     const RT = P.radarT || RADAR;

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Aircraft, computeLeadDir, airDensity, damageZone, repair, GEAR_VMAX, FLAP_VMAX, ZONE_NAMES } from './flight.js';
-import { World, groundHeight, ARENA_RADIUS, visRange, lineOfSight } from './world.js';
+import { World, groundHeight, ARENA_RADIUS, visRange, lineOfSight, MAP_KEY } from './world.js';
 import { buildJet, addNoseArt } from './models.js';
 import { Effects } from './effects.js';
 import { Combat } from './weapons.js';
@@ -22,7 +22,7 @@ import { Hud } from './hud.js';
 import { Audio } from './audio.js';
 import { Net, RemotePlane, packState } from './net.js';
 import { PRESETS, sanitize, spawnPoints, resolveJet, summary, encodeScenario, decodeScenario, SIDE_COLORS, countSeats, jetSpecLabel, MAX_PER_SIDE, aiConfig, aiLabel } from './scenario.js';
-import { Builder } from './builder.js';
+import { Builder, mapImage } from './builder.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -478,6 +478,7 @@ function startMatch(scn, roster, mode) {
   G.mode = mode;
   G.scn = sanitize(scn);
   world.setMap(G.scn.map);
+  G.mapImg = mapImage(MAP_KEY, 640);   // terrain under the tactical map (built once per map, then cached)
   world.setEnv(G.scn.time, G.scn.weather);
   G.ents = roster.map(makeEnt);
   G.byId = {};
@@ -1670,7 +1671,7 @@ function drawHud(dt) {
     radar: R, padlock: G.padlock, irst: P.irst, contacts, tgt: tgtInfo, blips, oppDist: tgtInfo ? tgtInfo.dist : 0,
     gunPoint, fpmPoint, leadPoint, closure,
     lock: { inCone: P.inCone, progress: P.lockProgress, locked: P.locked }, seekerPx,
-    threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm, myMsl, map: settings.mapRange === 0 ? 0 : settings.mapRange || 40000,
+    threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm, myMsl, mapImg: G.mapImg, map: settings.mapRange === 0 ? 0 : settings.mapRange || 40000,
     agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0, hint,
     ...strikeHud(P, me, fpmPoint),
     coach: (settings.coach !== false || G.scn.mode === 'training') && me ? missileCoach(P, combat.enemyMissiles(me.side)) : null,
