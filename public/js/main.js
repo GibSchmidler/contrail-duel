@@ -368,7 +368,8 @@ function startRound(r) {
   const P = myPlane();
   if (P) G.camQuat.copy(P.quat);
   setPhase('countdown', 3);
-  rec.start(G.scn, G.ents, G.units, G.mine);
+  // one recording for the whole match, so the debrief, replay and kill cams cover every round
+  if (r === 1 || rec.scn !== G.scn || !rec.frames.length) rec.start(G.scn, G.ents, G.units, G.mine); else rec.newRound(r, G.ents);
   hud.showBanner(`ROUND ${r}`, G.scn.name, '#ffffff', 2);
 }
 
@@ -1922,7 +1923,7 @@ function updateReplayBar() {
   $('rpPlay').textContent = R.playing ? '⏸' : '▶';
   $('rpSpeed').textContent = `${R.speed}×`;
   if (document.activeElement !== $('rpT')) $('rpT').value = Math.round((R.t / Math.max(1, R.end)) * 1000);
-  $('rpTime').textContent = `${fmtTime(R.t)} / ${fmtTime(R.end)}`;
+  $('rpTime').textContent = `${rec.rounds > 1 ? `Round ${rec.roundAt(R.t)} · ` : ''}${fmtTime(R.t)} / ${fmtTime(R.end)}`;
   $('rpFollow').textContent = G.freeCam ? 'Free camera (WASD, R/F, mouse drag)' : R.kill ? `Kill cam: ${F ? F.name : ''}` : F ? `${F.name} · ${jetOf(F.plane.type).name}` : '';
 }
 
@@ -1955,8 +1956,9 @@ function setupAar() {
   const has = rec.frames.length > 2;
   $('btnReplay').disabled = !has;
   const name = (id) => { const E = rec.ents[id]; return E ? esc(E.name) : '?'; };
-  const kills = rec.events.map((ev, i) => [ev, i]).filter(([ev]) => ev.type === 'kill');
-  $('aarKills').innerHTML = kills.length ? kills.map(([ev, i]) => `<div><span>${fmtTime(ev.t)} · ${ev.killer >= 0 ? `${name(ev.killer)} ▸ ` : ''}${name(ev.victim)} <span class="dim">(${WEAPON_WORD[ev.cause] || ev.cause})</span></span>${ev.killer >= 0 && ev.killer < 100 || ev.killer >= 300 ? `<button class="mini" data-k="${i}">🎥 Kill cam</button>` : ''}</div>`).join('') : '<span class="dim">No aircraft were lost.</span>';
+  const kills = rec.events.map((ev, i) => [ev, i]).filter(([ev]) => ev.type === 'kill' || (ev.type === 'round' && rec.rounds > 1));
+  if (rec.rounds > 1) kills.unshift([{ type: 'round', n: 1, t: 0 }, -1]);
+  $('aarKills').innerHTML = kills.some(([ev]) => ev.type === 'kill') ? kills.map(([ev, i]) => ev.type === 'round' ? `<div class="dim small"><b>Round ${ev.n}</b> · ${fmtTime(ev.t)}</div>` : `<div><span>${fmtTime(ev.t)} · ${ev.killer >= 0 ? `${name(ev.killer)} ▸ ` : ''}${name(ev.victim)} <span class="dim">(${WEAPON_WORD[ev.cause] || ev.cause})</span></span>${ev.killer >= 0 && ev.killer < 100 || ev.killer >= 300 ? `<button class="mini" data-k="${i}">🎥 Kill cam</button>` : ''}</div>`).join('') : '<span class="dim">No aircraft were lost.</span>';
   cancelAnimationFrame(aar.raf);
   let last = performance.now();
   const loop = (now) => {
@@ -1974,7 +1976,7 @@ function setupAar() {
 function drawAarNow() {
   drawAar($('aarMap'), rec, aar.t);
   $('aarT').value = Math.round((aar.t / Math.max(1, rec.length)) * 1000);
-  $('aarTime').textContent = `${fmtTime(aar.t)} / ${fmtTime(rec.length)}`;
+  $('aarTime').textContent = `${rec.rounds > 1 ? `Round ${rec.roundAt(aar.t)} · ` : ''}${fmtTime(aar.t)} / ${fmtTime(rec.length)}`;
 }
 
 // ---------------- briefing and profile screens ----------------

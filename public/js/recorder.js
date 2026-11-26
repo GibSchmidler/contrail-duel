@@ -18,6 +18,17 @@ export class Recorder {
     for (const e of ents) this.reg(e);
     this.units = units.map((u) => ({ x: u.pos.x, z: u.pos.z, name: u.name, side: u.side, key: u.key || u.D.key || '', cat: u.D.cat, ship: !!u.D.ship }));
   }
+  // a later round of the same match: keep recording on the same timeline, with a short gap so the
+  // tracks don't join up across the respawn, and a marker for the debrief
+  newRound(r, ents) {
+    if (!this.frames.length) return;
+    this.t += 3; this.acc = 0;
+    for (const e of ents) if (!this.ents[e.id]) this.reg(e);
+    this.event('round', { n: r });
+  }
+  // which round (1, 2, ...) was being flown at time t
+  roundAt(t) { let n = 1; for (const ev of this.events) if (ev.type === 'round' && ev.t <= t) n = ev.n; return n; }
+  get rounds() { return this.events.filter((ev) => ev.type === 'round').length + 1; }
   reg(e) { this.ents[e.id] = { name: e.name, side: e.side, type: e.plane.type }; }
   get length() { return this.frames.length ? this.frames[this.frames.length - 1].t : 0; }
 

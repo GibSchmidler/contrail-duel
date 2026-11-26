@@ -558,8 +558,11 @@ export class Combat {
       if (d < w.fuze) {
         const pos = m.prev.clone().lerp(m.pos, info.t);
         if (w.ag) return this.agImpact(m, pos, tgt.unit ? tgt : null);
-        const core = w.fuze * 0.4;
-        const dmg = d < core ? w.dmg : Math.max(20, w.dmg * (1 - 0.75 * (d - core) / (w.fuze - core)));
+        // Inside the warhead's lethal radius the fragment cloud destroys a fighter outright. Toward
+        // the edge of the fuze range fewer fragments hit, so a near miss can leave it badly damaged
+        // (a wing, engine or fuel tank gone, often a fire) but still flying, for a while at least.
+        const core = w.fuze * 0.7;
+        const dmg = d < core ? w.dmg * 1.2 : w.dmg * (1 - 0.55 * (d - core) / (w.fuze - core)) * (0.85 + 0.3 * Math.random());
         this.effects.explosion(pos, tgt.vel, false);
         this.audio?.explosion(pos, false);
         this.hooks.onDamage(tgt, dmg, 'msl', m.owner, pos, tgt.quat ? blastZone(tgt, pos) : null);
