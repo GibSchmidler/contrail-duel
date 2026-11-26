@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { mapImage } from './builder.js';
 import { SIDE_COLORS } from './scenario.js';
 import { UNITS } from './ground.js';
+import { WEAPONS } from './arsenal.js';
 
 const RATE = 0.2;            // s between samples
 const MAX_T = 3600;          // stop recording after an hour
@@ -11,7 +12,7 @@ const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion();
 
 export class Recorder {
   constructor() { this.clear(); }
-  clear() { this.frames = []; this.events = []; this.ents = {}; this.units = []; this.t = 0; this.acc = 0; this.scn = null; this.me = -1; }
+  clear() { this.frames = []; this.events = []; this.ents = {}; this.units = []; this.t = 0; this.acc = 0; this.scn = null; this.me = -1; this.mi = {}; }
   start(scn, ents, units, me) {
     this.clear();
     this.scn = scn; this.me = me ? me.id : -1;
@@ -25,6 +26,29 @@ export class Recorder {
     this.t += 3; this.acc = 0;
     for (const e of ents) if (!this.ents[e.id]) this.reg(e);
     this.event('round', { n: r });
+  }
+  // missiles in flight at time t
+  missilesAt(t) { return this.at(t).missiles; }
+  // last time a missile was recorded
+  missileEnd(id) {
+    for (let i = this.frames.length - 1; i >= 0; i--) { const m = this.frames[i].m; for (let j = 0; j < m.length; j += 6) if (m[j] === id) return this.frames[i].t; }
+    return 0;
+  }
+  // The missile that scored a kill: an enemy missile that was close to the victim just before it
+  // died and was gone right after.
+  killMissile(ev) {
+    if (!ev || ev.cause !== 'msl' || !ev.at) return null;
+    const V = this.ents[ev.victim];
+    let best = null, bd = 400;
+    for (let i = this.index(ev.t); i >= 0 && this.frames[i].t >= ev.t - 1.2; i--) {
+      const m = this.frames[i].m;
+      for (let j = 0; j < m.length; j += 6) {
+        if (V && m[j + 4] === V.side) continue;
+        const d = Math.hypot(m[j + 1] - ev.at[0], m[j + 2] - ev.at[2], m[j + 3] - ev.at[1]);
+        if (d < bd && this.missileEnd(m[j]) <= ev.t + 0.5) { bd = d; best = m[j]; }
+      }
+    }
+    return best;
   }
   // which round (1, 2, ...) was being flown at time t
   roundAt(t) { let n = 1; for (const ev of this.events) if (ev.type === 'round' && ev.t <= t) n = ev.n; return n; }
@@ -49,6 +73,12 @@ export class Recorder {
       const id = x.src ? x.src.id : x.id;
       if (id == null || !x.pos) continue;
       m.push(id, Math.round(x.pos.x), Math.round(x.pos.y), Math.round(x.pos.z), x.owner ? x.owner.side : -1, x.burning === false ? 0 : 1);
+      if (!this.mi[id]) {
+        // who fired it, at whom, and what it is: for the missile cam
+        const key = x.src && x.src.key ? x.src.key : x.key, o = x.owner, tg = x.target;
+        const eid = (q) => (q ? (q.ent ? q.ent.id : q.unit ? q.id : null) : null);
+        this.mi[id] = { name: key && WEAPONS[key] ? WEAPONS[key].name : 'Missile', by: eid(o), tgt: eid(tg), t0: this.t };
+      }
     }
     let u = '';
     for (const x of units) u += x.alive ? '1' : '0';

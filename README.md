@@ -42,7 +42,7 @@ Then use **Quick 1v1 match** (pairs the next two people searching), or **Host a 
 - **Training:** nine guided lessons with step-by-step prompts: flight basics, gunnery, air-to-air missiles (including a helmet-cued off-boresight shot), missile defence against a live SAM, bombing, SEAD, carrier landing, and two air-to-air missile defence lessons. In those, a scripted aggressor fires on cue: R-77s from long and short range (drag, notch, chaff in the notch, cutting the datalink, a salvo), then R-73s from behind and head-on (afterburner, flares, the break turn).
 - **Missile defence coach:** when a missile is guiding on you, a HUD box names it and shows its range, time to impact, clock position and your aspect. It says which radar you have to beat (the launcher's before pitbull, the missile's own after), shows live notch status (your closing speed against the limit, and whether you're below it), and gives the best defence for the moment. BEAM markers on the heading tape show where to turn. It's on by default (toggle it in the main menu) and always on in training.
 
-Missions open with a **briefing** (text, objectives and a map of the known threats). It's also on the pause menu. After a match, the **debrief** shows everyone's score, your accuracy, any medals earned, and an **after-action map**: every track, missile shot and kill, which you can scrub or play back. **Watch 3D replay** plays the whole round from any jet's view or a free camera. **Kill cam** replays each kill from behind the shooter.
+Missions open with a **briefing** (text, objectives and a map of the known threats). It's also on the pause menu. After a match, the **debrief** shows everyone's score, your accuracy, any medals earned, and an **after-action map**: every track, missile shot and kill, which you can scrub or play back. **Watch 3D replay** plays the whole match, every round, from any jet's view, riding along with any missile, or from a free camera. **Kill cam** replays each kill from behind the shooter, and **Missile cam** rides the missile that scored it from launch to impact, looking at its target.
 
 ## Scenarios
 
@@ -101,7 +101,7 @@ The other tabs build missions. Everything with a position can be placed and drag
 | P | Free camera when spectating or watching a replay (WASD, R/F up/down, drag the mouse to look, wheel for speed) |
 | Esc · H | Pause · help |
 
-In a replay: Space pauses, Q / E skip 10 s, R / F change speed, N follows the next jet, Esc returns to the debrief.
+In a replay: Space pauses, Q / E skip 10 s, R / F change speed, N follows the next jet, M follows a missile (the next one in flight, or skips ahead to the next launch), Esc returns to the debrief.
 
 ## Pilot profile
 

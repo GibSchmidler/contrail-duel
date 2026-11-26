@@ -1822,12 +1822,12 @@ function strikeHud(P, me, fpmPoint) {
 const _rq = new THREE.Quaternion(), _rv = new THREE.Vector3(), _rv2 = new THREE.Vector3();
 const replayMsl = [];
 const _mslGeo = new THREE.CylinderGeometry(0.12, 0.12, 3.6, 6).rotateX(Math.PI / 2), _mslMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e8 });
-function startReplay(t0 = 0, follow = null, kill = null) {
+function startReplay(t0 = 0, follow = null, kill = null, msl = null) {
   if (!rec.frames.length) { toast('Nothing was recorded.'); return; }
   effects.clear(); wrecks.clear(); combat.clear();
   const ids = [...rec.at(t0).jets.keys()];
   const ok = (id) => id != null && G.byId[id] && !G.byId[id].unit;
-  G.replay = { t: t0, last: t0, speed: 1, playing: true, follow: ok(follow) ? follow : G.mine ? G.mine.id : ids[0], kill: ok(follow) ? kill : null, end: rec.length };
+  G.replay = { t: t0, last: t0, speed: 1, playing: true, follow: ok(follow) ? follow : G.mine ? G.mine.id : ids[0], kill: ok(follow) ? kill : null, end: rec.length, msl, mslLast: null, mslGone: 0 };
   G.freeCam = false; G.specQuat.copy(camera.quaternion);
   aar.playing = false;
   showScreen(null);
@@ -1846,7 +1846,28 @@ function replayNext() {
   const R = G.replay; if (!R) return;
   const ids = [...rec.at(R.t).jets.keys()].filter((id) => G.byId[id]).sort((a, b) => a - b);
   if (!ids.length) return;
-  R.follow = ids[(ids.indexOf(R.follow) + 1) % ids.length]; R.kill = null; G.freeCam = false;
+  R.follow = ids[(ids.indexOf(R.follow) + 1) % ids.length]; R.kill = null; R.msl = null; G.freeCam = false;
+}
+// Follow a missile: the next one in flight (nearest to whatever you're watching first), or if
+// none is flying, skip ahead to the next launch.
+function replayNextMissile() {
+  const R = G.replay; if (!R) return;
+  let ms = rec.missilesAt(R.t);
+  if (!ms.length || (ms.length === 1 && ms[0].id === R.msl)) {
+    // nothing else in flight: jump to the next launch of a different missile
+    const F = rec.frames, i0 = rec.index(R.t), now = new Set(ms.map((m) => m.id));
+    const fresh = (f) => { for (let k = 0; k < f.m.length; k += 6) if (!now.has(f.m[k])) return true; return false; };
+    let j = i0 + 1; while (j < F.length && !fresh(F[j])) j++;
+    if (j >= F.length) { flash('NO MORE MISSILES IN THIS RECORDING', 1.6); return; }
+    R.t = R.last = F[j].t; effects.clear(); ms = rec.missilesAt(R.t).filter((m) => !now.has(m.id));
+    if (!ms.length) return;
+    R.msl = null;
+  }
+  ms.sort((a, b) => a.pos.distanceTo(camera.position) - b.pos.distanceTo(camera.position));
+  const i = ms.findIndex((m) => m.id === R.msl);
+  R.msl = ms[(i + 1) % ms.length].id; R.mslLast = null; R.mslGone = 0; R.kill = null; G.freeCam = false;
+  const by = rec.mi[R.msl] && rec.mi[R.msl].by;
+  if (by != null && G.byId[by] && !G.byId[by].unit) R.follow = by;
 }
 function replayStep(dt) {
   const R = G.replay;
@@ -1856,10 +1877,12 @@ function replayStep(dt) {
   if (input.tapped('throttleUp')) R.speed = Math.min(8, R.speed * 2);
   if (input.tapped('throttleDown')) R.speed = Math.max(0.25, R.speed / 2);
   if (input.tapped('cycle')) replayNext();
+  if (input.tapped('radio')) replayNextMissile();
   if (R.playing) R.t = Math.min(R.end, R.t + dt * R.speed);
   if (R.t >= R.end) R.playing = false;
-  if (R.kill && R.t > R.kill.t + 3) { stopReplay(); return; }
+  if (R.kill && (R.t > R.kill.t + 3 || (R.t >= R.end && (R.endT = (R.endT || 0) + dt) > 2.5))) { stopReplay(); return; }
   const st = rec.at(R.t);
+  R.st = st;
   for (const e of G.ents) {
     const x = st.jets.get(e.id), pl = e.plane;
     if (!x) { pl.alive = false; continue; }
@@ -1888,8 +1911,46 @@ function replayStep(dt) {
   }
   R.last = R.t;
 }
+const _rup = new THREE.Vector3(0, 1, 0), _rm4 = new THREE.Matrix4();
+// missile cam: ride just behind the missile, looking at its target once the target is ahead
+// (otherwise along its flight path); when it's gone, hold on the spot where it ended
+function missileCamera(dt) {
+  const R = G.replay, info = rec.mi[R.msl] || {};
+  const m = R.st && R.st.missiles.find((x) => x.id === R.msl);
+  if (!m && R.t < (info.t0 ?? 0)) { R.mslLast = null; return false; }   // not fired yet: watch the shooter
+  let look;
+  if (m) {
+    R.mslGone = 0;
+    const v = _rv.copy(m.vel);
+    if (v.lengthSq() < 1) v.copy(R.mslDir || _rv2.set(0, 0, -1)); v.normalize();
+    R.mslDir = (R.mslDir || new THREE.Vector3()).copy(v);
+    R.mslLast = (R.mslLast || new THREE.Vector3()).copy(m.pos);
+    look = _rv2.copy(m.pos).addScaledVector(v, 400);
+    const T = info.tgt != null ? G.byId[info.tgt] : null;
+    const tp = T ? (T.unit ? T.pos : T.plane.alive ? T.plane.pos : null) : null;
+    if (tp) { _off.subVectors(tp, m.pos); const d = _off.length(); if (d > 1 && _off.dot(v) / d > 0.35) look.copy(tp); }
+    camera.position.copy(m.pos).addScaledVector(v, -24); camera.position.y += 3.5;
+  } else if (R.mslLast) {
+    R.mslGone += dt;
+    look = R.mslLast;
+    if (R.mslGone > 3 && !R.kill) {
+      // done: carry on watching its target, or whoever fired it
+      const T = info.tgt != null ? G.byId[info.tgt] : null;
+      R.follow = T && !T.unit && T.plane.alive ? info.tgt : info.by != null && G.byId[info.by] && !G.byId[info.by].unit ? info.by : R.follow;
+      R.msl = null; return false;
+    }
+  } else return false;
+  _rm4.lookAt(camera.position, look, _rup); _rq.setFromRotationMatrix(_rm4);
+  G.specQuat.slerp(_rq, 1 - Math.exp(-dt * (m ? 6 : 3)));
+  camera.quaternion.copy(G.specQuat); camera.up.set(0, 1, 0);
+  const gh = groundHeight(camera.position.x, camera.position.z) + 3;
+  if (camera.position.y < gh) camera.position.y = gh;
+  return true;
+}
 function replayCamera(dt) {
-  const R = G.replay, F = G.byId[R.follow];
+  const R = G.replay;
+  if (R.msl != null && missileCamera(dt)) return;
+  const F = G.byId[R.follow];
   const pl = F && !F.unit ? F.plane : null;
   if (!pl || !pl.alive) {
     // the followed jet is gone: orbit the spot where it was last seen
@@ -1924,7 +1985,8 @@ function updateReplayBar() {
   $('rpSpeed').textContent = `${R.speed}×`;
   if (document.activeElement !== $('rpT')) $('rpT').value = Math.round((R.t / Math.max(1, R.end)) * 1000);
   $('rpTime').textContent = `${rec.rounds > 1 ? `Round ${rec.roundAt(R.t)} · ` : ''}${fmtTime(R.t)} / ${fmtTime(R.end)}`;
-  $('rpFollow').textContent = G.freeCam ? 'Free camera (WASD, R/F, mouse drag)' : R.kill ? `Kill cam: ${F ? F.name : ''}` : F ? `${F.name} · ${jetOf(F.plane.type).name}` : '';
+  const mi = R.msl != null ? rec.mi[R.msl] : null, nm = (id) => (id != null && G.byId[id] ? G.byId[id].name : '?');
+  $('rpFollow').textContent = G.freeCam ? 'Free camera (WASD, R/F, mouse drag)' : mi ? `Missile cam: ${mi.name} · ${nm(mi.by)} ▸ ${nm(mi.tgt)}` : R.kill ? `Kill cam: ${F ? F.name : ''}` : F ? `${F.name} · ${jetOf(F.plane.type).name}` : '';
 }
 
 // ---------------- free camera (spectating and replays) ----------------
@@ -1958,7 +2020,7 @@ function setupAar() {
   const name = (id) => { const E = rec.ents[id]; return E ? esc(E.name) : '?'; };
   const kills = rec.events.map((ev, i) => [ev, i]).filter(([ev]) => ev.type === 'kill' || (ev.type === 'round' && rec.rounds > 1));
   if (rec.rounds > 1) kills.unshift([{ type: 'round', n: 1, t: 0 }, -1]);
-  $('aarKills').innerHTML = kills.some(([ev]) => ev.type === 'kill') ? kills.map(([ev, i]) => ev.type === 'round' ? `<div class="dim small"><b>Round ${ev.n}</b> · ${fmtTime(ev.t)}</div>` : `<div><span>${fmtTime(ev.t)} · ${ev.killer >= 0 ? `${name(ev.killer)} ▸ ` : ''}${name(ev.victim)} <span class="dim">(${WEAPON_WORD[ev.cause] || ev.cause})</span></span>${ev.killer >= 0 && ev.killer < 100 || ev.killer >= 300 ? `<button class="mini" data-k="${i}">🎥 Kill cam</button>` : ''}</div>`).join('') : '<span class="dim">No aircraft were lost.</span>';
+  $('aarKills').innerHTML = kills.some(([ev]) => ev.type === 'kill') ? kills.map(([ev, i]) => ev.type === 'round' ? `<div class="dim small"><b>Round ${ev.n}</b> · ${fmtTime(ev.t)}</div>` : `<div><span>${fmtTime(ev.t)} · ${ev.killer >= 0 ? `${name(ev.killer)} ▸ ` : ''}${name(ev.victim)} <span class="dim">(${WEAPON_WORD[ev.cause] || ev.cause})</span></span>${ev.killer >= 0 && ev.killer < 100 || ev.killer >= 300 ? `<button class="mini" data-k="${i}">🎥 Kill cam</button>` : ''}${ev.cause === 'msl' && rec.killMissile(ev) != null ? `<button class="mini" data-km="${i}">🚀 Missile cam</button>` : ''}</div>`).join('') : '<span class="dim">No aircraft were lost.</span>';
   cancelAnimationFrame(aar.raf);
   let last = performance.now();
   const loop = (now) => {
@@ -2261,7 +2323,16 @@ function initMenu() {
   $('btnReplay').onclick = () => startReplay(0, null, null);
   $('aarPlay').onclick = () => { aar.playing = !aar.playing; if (aar.playing && aar.t >= rec.length - 0.1) aar.t = 0; $('aarPlay').textContent = aar.playing ? '⏸ Pause' : '▶ Play'; };
   $('aarT').oninput = (e) => { aar.t = (+e.target.value / 1000) * rec.length; aar.playing = false; $('aarPlay').textContent = '▶ Play'; drawAarNow(); };
-  $('aarKills').onclick = (e) => { const b = e.target.closest('button[data-k]'); if (!b) return; const ev = rec.events[+b.dataset.k]; startReplay(Math.max(0, ev.t - 7), ev.killer, ev); };
+  $('aarKills').onclick = (e) => {
+    const b = e.target.closest('button[data-k]'), bm = e.target.closest('button[data-km]');
+    if (b) { const ev = rec.events[+b.dataset.k]; startReplay(Math.max(0, ev.t - 7), ev.killer, ev); }
+    if (bm) {
+      // from just before launch to just after impact, riding the missile
+      const ev = rec.events[+bm.dataset.km], id = rec.killMissile(ev), mi = rec.mi[id] || {};
+      startReplay(Math.max(0, (mi.t0 ?? ev.t - 20) - 1.5, ev.t - 45), mi.by ?? ev.killer, ev, id);
+    }
+  };
+  $('rpMsl').onclick = () => replayNextMissile();
   $('rpPlay').onclick = () => { if (G.replay) G.replay.playing = !G.replay.playing; };
   $('rpBack').onclick = () => replaySeek(-10);
   $('rpFwd').onclick = () => replaySeek(10);
@@ -2290,7 +2361,7 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach,
+window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile,
   // advance the game n frames of 1/60 s (for testing when the tab is in the background)
   get acc() { return acc; },
   tick(n = 60) { G.noRender = true; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },
