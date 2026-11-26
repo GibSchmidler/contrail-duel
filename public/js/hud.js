@@ -1,7 +1,7 @@
 // 2D canvas HUD drawn over the 3D view.
 import * as THREE from 'three';
 import { JET, GRAV, airDensity, liftCoef } from './flight.js';
-import { WEAPONS, RADAR, countOf, firstOf } from './arsenal.js';
+import { WEAPONS, RADAR, countOf, firstOf, flyout } from './arsenal.js';
 
 const GREEN = '#9dffb8';
 const RED = '#ff5a4a';
@@ -456,9 +456,16 @@ export class Hud {
   // this jet knows. Own radar/IRST/eyes tracks, datalink tracks, wingmen, RWR bearings (no range),
   // missiles the warner sees, known SAM threat rings, mission points, and the radar's coverage.
   tsd(S, sc) {
-    const range = S.map;
-    if (!range) return;
+    const userRange = S.map;
+    if (!userRange) return;
     const c = this.ctx, P = S.plane, w = this.w, h = this.h;
+    const now = this.flashT, dtm = Math.min(0.1, Math.max(0, now - (this.mapT || now)));
+    this.mapT = now;
+    // missiles coming at us, as far as our own warning systems know; zoom in to fit the nearest
+    const TP = this.threatPicture(S, dtm);
+    const want = TP.dist != null ? [5000, 10000, 20000, 40000, 80000].find((r) => r >= TP.dist * 1.35) || 80000 : userRange;
+    this.mapRng = this.mapRng ? Math.exp(Math.log(this.mapRng) + (Math.log(want) - Math.log(this.mapRng)) * Math.min(1, dtm * 4)) : want;
+    const range = this.mapRng, auto = want !== userRange;
     const R = Math.round(Math.min(84 * sc, w * 0.075));
     const cx = w - (this.touch ? 18 : 24) * sc - R, cy = this.touch ? 30 * sc + R : h - 176 * sc - (S.ag ? 20 * sc : 0) - 30 * sc - R;
     this.mapBottom = cy + R + 12 * sc;
@@ -577,12 +584,8 @@ export class Hud {
     // my missiles in flight
     c.fillStyle = CYAN;
     for (const p of S.myMsl || []) { const [x, y] = toMap(p); if (inside(x, y)) { c.beginPath(); c.arc(x, y, 1.6 * sc, 0, Math.PI * 2); c.fill(); } }
-    // missiles the warning system sees coming
-    font(10, true); c.textAlign = 'center';
-    for (const t of S.threats || []) {
-      const [x, y] = clampRim(...toMap(t.pos), 6 * sc);
-      c.fillStyle = blink ? RED : '#ffffff'; c.fillText('M', x, y);
-    }
+    // incoming missiles, to the best of the jet's knowledge
+    this.threatDraw(TP, { c, cx, cy, R, sc, k, fx, fz, rx, rz, toMap, clampRim, font, blink, P });
     // RWR: bearing only, so the emitter sits on the rim, not at a range
     const T = S.threat;
     if (T && T.emitters) {
@@ -601,9 +604,118 @@ export class Hud {
     c.beginPath(); c.moveTo(cx, cy - 6 * sc); c.lineTo(cx + 4.5 * sc, cy + 4 * sc); c.lineTo(cx, cy + 2 * sc); c.lineTo(cx - 4.5 * sc, cy + 4 * sc); c.closePath(); c.fill();
     // range and heading
     font(10); c.fillStyle = 'rgba(157,255,184,0.75)';
-    c.textAlign = 'left'; c.fillText(`${range / 1000}`, cx + R * 0.72, cy - R * 0.86);
+    c.textAlign = 'left';
+    if (auto) { c.fillStyle = blink ? RED : AMBER; c.fillText(`${Math.round(range / 1000)} AUTO`, cx + R * 0.6, cy - R * 0.86); c.fillStyle = 'rgba(157,255,184,0.75)'; }
+    else c.fillText(`${Math.round(range / 1000)}`, cx + R * 0.72, cy - R * 0.86);
     c.textAlign = 'right'; c.fillText(`${String(Math.round(((Math.atan2(fx, -fz) * 180) / Math.PI + 360) % 360)).padStart(3, '0')}°`, cx - R * 0.66, cy - R * 0.86);
     c.textAlign = 'center'; font(9); c.fillText('MAP · O', cx, cy + R + 10 * sc);
+    c.restore();
+  }
+
+  // What this jet knows about missiles coming at it:
+  //  - seen: the missile warner has the burning motor, so position and track are known (and are
+  //    carried forward for a few seconds after the motor burns out);
+  //  - est: an RWR launch warning from a jet holding a lock on us. We know where it fired from and
+  //    when, so we estimate how far the missile has come along that line;
+  //  - brg: an active radar seeker on the RWR, a bearing with no range.
+  threatPicture(S, dt) {
+    const P = S.plane, T = S.threat || {}, items = [];
+    const mem = this.mslMem || (this.mslMem = new Map());
+    for (const t of T.list || []) {
+      if (t.seen && t.ref) {
+        let m = mem.get(t.ref);
+        if (!m) mem.set(t.ref, (m = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), age: 0 }));
+        m.pos.copy(t.pos); if (t.vel) m.vel.copy(t.vel); m.age = 0; m.live = true;
+      } else if (t.kind === 'active') items.push({ brg: true, pos: t.pos });
+    }
+    for (const [key, m] of mem) {
+      if (!m.live) { m.age += dt; m.pos.addScaledVector(m.vel, dt); if (m.age > 4) { mem.delete(key); continue; } }
+      m.live = false;
+      items.push({ seen: true, pos: m.pos, vel: m.vel, age: m.age, dist: m.pos.distanceTo(P.pos) });
+    }
+    const lm = this.launchMem || (this.launchMem = new Map());
+    const firing = new Set();
+    for (const e of T.emitters || []) {
+      if (!e.launch || !e.plane) continue;
+      firing.add(e.plane);
+      let L = lm.get(e.plane);
+      if (!L) lm.set(e.plane, (L = { from: e.pos.clone(), t: 0 }));
+      L.t += dt;
+      // how far a typical medium-range missile has flown by now (the jet doesn't know which missile it is)
+      const fo = this.refFlyout(L.from.y), fi = Math.min(fo.s.length - 1, Math.floor(L.t / fo.dt));
+      const run = L.from.distanceTo(P.pos), flown = Math.min(run - 400, fo.s[fi] + (L.t - fi * fo.dt) * (fo.v[fi] || 0));
+      const pos = _w.copy(P.pos).sub(L.from).normalize().multiplyScalar(Math.max(0, flown)).add(L.from).clone();
+      items.push({ est: true, pos, from: L.from, code: e.code, dist: Math.max(400, run - flown) });
+    }
+    for (const key of lm.keys()) if (!firing.has(key)) lm.delete(key);
+    // the nearest one we can range sets the zoom; an active seeker alone means it's close
+    let dist = null, primary = null;
+    for (const it of items) {
+      const d = it.brg ? 7000 : it.dist;
+      if (dist == null || d < dist) { dist = d; primary = it; }
+    }
+    return (this.lastThreat = { items, dist, primary });
+  }
+
+  refFlyout(alt) {
+    const k = Math.round(Math.max(0, alt) / 2000);
+    const C = this.foCache || (this.foCache = {});
+    return C[k] || (C[k] = flyout('aim120', 280, airDensity(k * 2000)));   // launched from a jet at about 280 m/s
+  }
+
+  threatDraw(TP, o) {
+    const { c, cx, cy, R, sc, toMap, clampRim, font, blink, P } = o;
+    if (!TP.items.length) return;
+    const bearingOf = (pos) => { const [x, y] = toMap(pos); return Math.atan2(x - cx, cy - y); };
+    // beam guide for the most urgent missile: the two directions at 90° to it. Turn until one points up (your nose).
+    const a = bearingOf(TP.primary.pos);
+    const off = Math.abs(Math.abs(((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI) - Math.PI / 2);
+    const onBeam = off < 0.21;
+    c.save();
+    c.setLineDash([5 * sc, 4 * sc]); c.lineWidth = 1.6 * sc;
+    c.strokeStyle = onBeam ? GREEN : AMBER; c.fillStyle = c.strokeStyle;
+    font(8, true); c.textAlign = 'center';
+    for (const s of [-1, 1]) {
+      const b = a + (s * Math.PI) / 2;
+      c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.sin(b) * R * 0.9, cy - Math.cos(b) * R * 0.9); c.stroke();
+      c.fillText('BEAM', cx + Math.sin(b) * R * 0.62, cy - Math.cos(b) * R * 0.62 - 6 * sc);
+    }
+    // threat axis
+    c.setLineDash([]); c.strokeStyle = RED; c.lineWidth = 2 * sc;
+    c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.sin(a) * R, cy - Math.cos(a) * R); c.stroke();
+    c.lineWidth = 1.3 * sc;
+    for (const it of TP.items) {
+      const b = bearingOf(it.pos);
+      if (it.brg) {
+        // active seeker: direction only
+        c.fillStyle = blink ? RED : '#ffffff'; font(10, true);
+        c.beginPath(); c.moveTo(cx + Math.sin(b) * R * 0.55, cy - Math.cos(b) * R * 0.55); c.lineTo(cx + Math.sin(b) * R, cy - Math.cos(b) * R); c.strokeStyle = RED; c.stroke();
+        c.fillText('M', cx + Math.sin(b) * (R - 9 * sc), cy - Math.cos(b) * (R - 9 * sc));
+        continue;
+      }
+      const [x, y, offMap] = clampRim(...toMap(it.pos), 6 * sc);
+      c.globalAlpha = it.seen ? Math.max(0.35, 1 - (it.age || 0) / 4) : 0.9;
+      c.strokeStyle = RED; c.fillStyle = RED;
+      if (it.seen && !offMap) {
+        // missile symbol pointing along its track, with a line to us
+        const vx = it.vel.x * o.rx + it.vel.z * o.rz, vy = it.vel.x * o.fx + it.vel.z * o.fz, vl = Math.hypot(vx, vy) || 1;
+        const ux = vx / vl, uy = -vy / vl, s = 5 * sc;
+        c.beginPath(); c.moveTo(x + ux * s * 1.4, y + uy * s * 1.4); c.lineTo(x - ux * s - uy * s * 0.6, y - uy * s + ux * s * 0.6); c.lineTo(x - ux * s + uy * s * 0.6, y - uy * s - ux * s * 0.6); c.closePath(); c.fill();
+        c.setLineDash([3 * sc, 3 * sc]); c.beginPath(); c.moveTo(x, y); c.lineTo(cx, cy); c.stroke(); c.setLineDash([]);
+      } else if (!offMap) {
+        // launch warning: estimated position along the line from the shooter, drawn hollow with a ?
+        c.setLineDash([3 * sc, 3 * sc]); c.beginPath(); c.moveTo(cx + Math.sin(b) * R, cy - Math.cos(b) * R); c.lineTo(cx, cy); c.stroke(); c.setLineDash([]);
+        c.beginPath(); c.arc(x, y, 4.5 * sc, 0, Math.PI * 2); c.stroke();
+        font(8, true); c.fillText('?', x, y);
+      } else {
+        c.beginPath(); c.arc(x, y, 3.5 * sc, 0, Math.PI * 2); c.fill();
+      }
+      font(8, true); c.textAlign = 'left';
+      c.fillText(`${(it.dist / 1000).toFixed(1)}${it.est ? '?' : ''}`, x + 7 * sc, y + 7 * sc);
+      c.textAlign = 'center';
+      c.globalAlpha = 1;
+    }
+    if (onBeam) { font(9, true); c.fillStyle = GREEN; c.fillText('ON BEAM', cx, cy + R * 0.42); }
     c.restore();
   }
 

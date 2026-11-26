@@ -2409,5 +2409,5 @@ requestAnimationFrame(frame);
 window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile, killPlane, touch,
   // advance the game n frames of 1/60 s (for testing when the tab is in the background)
   get acc() { return acc; },
-  tick(n = 60) { G.noRender = true; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },
+  tick(n = 60, draw = false) { G.noRender = !draw; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },
 };

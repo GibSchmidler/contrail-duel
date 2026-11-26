@@ -308,8 +308,11 @@ export function assessThreatsMulti(me, enemies, missiles) {
       const em = out.emitters.find((e) => e.plane === m.owner && e.lock);
       if (em) { out.launch = true; em.launch = true; }
     }
-    if (maws && m.burning && closing && d < MAWS.range && lineOfSight(m.pos, me.pos)) { out.maws = true; kind = kind || 'maws'; }
-    if (kind) { out.list.push({ pos: m.pos, kind, dist: d }); out.nearest = Math.min(out.nearest, d); }
+    let seen = false;
+    if (maws && m.burning && closing && d < MAWS.range && lineOfSight(m.pos, me.pos)) { out.maws = true; kind = kind || 'maws'; seen = true; }
+    // seen: the missile warner has the burning motor, so position and track are known; an active
+    // seeker alone (RWR) gives only a bearing. ref identifies the missile from frame to frame.
+    if (kind) { out.list.push({ pos: m.pos, vel: m.vel, kind, dist: d, seen, ref: m }); out.nearest = Math.min(out.nearest, d); }
   }
   if (out.launch) { const em = out.emitters.find((e) => e.launch); if (em) { out.emitter = em; out.code = em.code; } }
   return out;
