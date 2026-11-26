@@ -6,7 +6,7 @@ import { Effects } from './effects.js';
 import { Combat } from './weapons.js';
 import { updateRadar, updateIrLock, updateIrst, scanContacts, datalinkPicture, assessThreatsMulti, canSee, radialSpeed, inNotch } from './sensors.js';
 import { WEAPONS, GUNS, RADARS, firstOf, countOf, nextStation, flyout, launchZone, agKinds, countKey, AG_LABEL } from './arsenal.js';
-import { Unit, UnitView, packUnits, applyUnits, UNITS } from './ground.js';
+import { Unit, UnitView, packUnits, applyUnits, UNITS, threatRing } from './ground.js';
 import { impactPoint, stationOf, scanGround, pickGround, releaseCheck, updateAgLock } from './strike.js';
 import { surfaceFn, tryLand, land, deckStep, deckStatus } from './carrier.js';
 import { Mission, Race, defaultLabel } from './mission.js';
@@ -1147,6 +1147,11 @@ function frame(now) {
   if (input.tapped('freeCam') && G.mode && (G.replay || !myPlane() || !myPlane().alive)) toggleFreeCam();
   if (input.tapped('help') && G.mode) $('help').classList.toggle('show');
   if (input.tapped('camera')) G.camMode = G.camMode === 'chase' ? 'cockpit' : 'chase';
+  if (input.tapped('map') && G.mode && !G.replay) {
+    const steps = [10000, 20000, 40000, 80000, 0], cur = settings.mapRange === 0 ? 0 : settings.mapRange || 40000;
+    settings.mapRange = steps[(steps.indexOf(cur) + 1) % steps.length]; saveSettings();
+    flash(settings.mapRange ? `MAP ${settings.mapRange / 1000} KM` : 'MAP OFF', 1);
+  }
   if (input.tapped('padlock')) { G.padlock = !G.padlock; flash(G.padlock ? 'PADLOCK / HELMET CUE ON' : 'PADLOCK OFF', 1); }
 
   const inGame = G.mode && G.phase !== 'menu';
@@ -1608,13 +1613,13 @@ function drawHud(dt) {
     const dist = pos.distanceTo(P.pos);
     let kind = visual ? 'eyes' : c.radar ? 'trk' : c.irst ? 'irst' : c.dl ? 'dl' : 'mem';
     if (isT && R.contact) kind = R.stt ? 'stt' : R.mem < 1.95 ? 'mem' : 'trk';
-    const k = { pos, dist, kind, name: e.ent ? e.ent.name : 'BANDIT', hp: e.hp, tgt: isT, visual };
+    const k = { pos, vel: visual ? e.vel : isT && R.contact ? R.vel : c.vel, dist, kind, name: e.ent ? e.ent.name : 'BANDIT', hp: e.hp, tgt: isT, visual };
     contacts.push(k);
     if (isT) tgtInfo = k;
   }
   for (const e of G.sides[me.side]) {
     if (e === me || !e.plane.alive) continue;
-    contacts.push({ pos: e.plane.pos, dist: e.plane.pos.distanceTo(P.pos), kind: 'friend', name: e.name });
+    contacts.push({ pos: e.plane.pos, vel: e.plane.vel, dist: e.plane.pos.distanceTo(P.pos), kind: 'friend', name: e.name });
   }
   const O = P.tgt;
   if (O && O.alive && tgtInfo) {
@@ -1647,8 +1652,9 @@ function drawHud(dt) {
   const srmKey = firstOf(P.stores, 'srm');
   const cone = srmKey && P.weapon === 'srm' ? WEAPONS[srmKey].lockCone : 0;
   const seekerPx = cone ? (Math.tan(cone) / tanHalf) * (H / 2) : 0;
-  const myMrm = [];
+  const myMrm = [], myMsl = [];
   for (const m of combat.missiles) {
+    if (m.owner === P && m.pos) myMsl.push(m.pos);
     if (m.owner !== P || (m.w.guidance !== 'radar' && m.w.guidance !== 'sarh')) continue;
     let status;
     if (m.w.guidance === 'sarh') status = m.lost || m.decoy || !P.radar.stt ? 'LOST' : 'ILL';
@@ -1664,7 +1670,7 @@ function drawHud(dt) {
     radar: R, padlock: G.padlock, irst: P.irst, contacts, tgt: tgtInfo, blips, oppDist: tgtInfo ? tgtInfo.dist : 0,
     gunPoint, fpmPoint, leadPoint, closure,
     lock: { inCone: P.inCone, progress: P.lockProgress, locked: P.locked }, seekerPx,
-    threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm,
+    threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm, myMsl, map: settings.mapRange === 0 ? 0 : settings.mapRange || 40000,
     agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0, hint,
     ...strikeHud(P, me, fpmPoint),
     coach: (settings.coach !== false || G.scn.mode === 'training') && me ? missileCoach(P, combat.enemyMissiles(me.side)) : null,
@@ -1767,7 +1773,7 @@ function strikeHud(P, me, fpmPoint) {
     if (!u.alive) continue;
     const isT = P.weapon === 'ag' && u === P.agt;
     const cls = P.agKey && WEAPONS[P.agKey] ? WEAPONS[P.agKey].cls : null;
-    gnd.push({ pos: u.pos.clone().setY(u.base + Math.min(u.h, 30) * 0.6), name: u.name, code: u.T && u.T.rwr, emit: u.radarMode > 0, tgt: isT, lock: isT && (cls === 'agm' || cls === 'ashm') ? P.agLock || 0 : null, how: k.how, dist: u.pos.distanceTo(P.pos) });
+    gnd.push({ pos: u.pos.clone().setY(u.base + Math.min(u.h, 30) * 0.6), name: u.name, code: u.T && u.T.rwr, emit: u.radarMode > 0, ring: threatRing(u.D), tgt: isT, lock: isT && (cls === 'agm' || cls === 'ashm') ? P.agLock || 0 : null, how: k.how, dist: u.pos.distanceTo(P.pos) });
   }
   for (const u of G.units) {
     if (!u.alive || u.side !== me.side || !u.D.ship) continue;

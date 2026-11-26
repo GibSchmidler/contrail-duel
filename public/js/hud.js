@@ -49,6 +49,7 @@ export class Hud {
       this.weapons(S, scale);
       this.radar(S, scale);
       this.rwr(S, scale);
+      this.tsd(S, scale);
       this.dlz(S, scale);
       this.ground(S, scale);
       this.ccip(S, scale);
@@ -445,6 +446,145 @@ export class Hud {
       c.globalAlpha = 1;
     }
     c.fillStyle = GREEN; c.beginPath(); c.moveTo(cx, cy - 6 * sc); c.lineTo(cx - 4 * sc, cy + 2 * sc); c.lineTo(cx + 4 * sc, cy + 2 * sc); c.closePath(); c.fill();
+  }
+
+  // Tactical situation display (like an F-16 HSD or F/A-18 SA page): a heading-up map of only what
+  // this jet knows. Own radar/IRST/eyes tracks, datalink tracks, wingmen, RWR bearings (no range),
+  // missiles the warner sees, known SAM threat rings, mission points, and the radar's coverage.
+  tsd(S, sc) {
+    const range = S.map;
+    if (!range) return;
+    const c = this.ctx, P = S.plane, w = this.w, h = this.h;
+    const R = Math.round(Math.min(84 * sc, w * 0.075));
+    const cx = w - 24 * sc - R, cy = h - 176 * sc - (S.ag ? 20 * sc : 0) - 30 * sc - R;
+    // heading-up frame from the horizontal part of the nose (keep the last one when pointing straight up/down)
+    let fx = P.fwd.x, fz = P.fwd.z;
+    const fl = Math.hypot(fx, fz);
+    if (fl > 0.05) { fx /= fl; fz /= fl; this.mapF = [fx, fz]; } else if (this.mapF) [fx, fz] = this.mapF; else { fx = 0; fz = -1; }
+    const rx = -fz, rz = fx, k = R / range;
+    const toMap = (pos) => { const dx = pos.x - P.pos.x, dz = pos.z - P.pos.z; return [cx + (dx * rx + dz * rz) * k, cy - (dx * fx + dz * fz) * k]; };
+    const inside = (x, y, m = 0) => Math.hypot(x - cx, y - cy) <= R - m;
+    const clampRim = (x, y, m) => { const d = Math.hypot(x - cx, y - cy), lim = R - m; return d <= lim ? [x, y, false] : [cx + ((x - cx) * lim) / d, cy + ((y - cy) * lim) / d, true]; };
+    const font = (px, bold) => { c.font = `${bold ? 'bold ' : ''}${Math.round(px * sc)}px "Consolas","Menlo",monospace`; };
+    const blink = Math.floor(this.flashT * 6) % 2 === 0;
+    c.save();
+    c.lineWidth = 1.3 * sc;
+    c.fillStyle = 'rgba(0,16,6,0.5)'; c.strokeStyle = 'rgba(157,255,184,0.5)';
+    c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.fill(); c.stroke();
+    c.save();
+    c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.clip();
+    c.shadowBlur = 0;
+    c.strokeStyle = 'rgba(157,255,184,0.2)'; c.beginPath(); c.arc(cx, cy, R / 2, 0, Math.PI * 2); c.stroke();
+    // radar coverage: the scan volume ahead of the nose
+    const RT = P.radarT || RADAR;
+    if (RT && RT.range) {
+      const g = Math.min(1.4, RT.gimbal), rr = Math.min(R * 1.2, RT.range * k);
+      c.fillStyle = S.radar && S.radar.stt ? 'rgba(255,90,74,0.07)' : 'rgba(157,255,184,0.07)';
+      c.beginPath(); c.moveTo(cx, cy); c.arc(cx, cy, rr, -Math.PI / 2 - g, -Math.PI / 2 + g); c.closePath(); c.fill();
+    }
+    // known SAM / AAA sites: threat rings (solid and red while their radar is up, dashed amber when silent)
+    font(9);
+    c.textAlign = 'center';
+    for (const g of S.gnd || []) {
+      if (g.friend || !g.ring) continue;
+      const [x, y] = toMap(g.pos), rr = g.ring * k;
+      if (Math.hypot(x - cx, y - cy) > R + rr) continue;
+      c.strokeStyle = g.emit ? 'rgba(255,90,74,0.8)' : 'rgba(255,204,85,0.55)';
+      c.setLineDash(g.emit ? [] : [4 * sc, 3 * sc]);
+      c.beginPath(); c.arc(x, y, Math.max(rr, 3 * sc), 0, Math.PI * 2); c.stroke();
+      c.setLineDash([]);
+      c.fillStyle = c.strokeStyle; c.fillText(g.code || 'SAM', x, y);
+    }
+    c.restore();
+    // compass: north marker and ticks every 30°
+    const nA = Math.atan2(-fx, -fz);   // screen angle of world north (-z): 0 = up, clockwise
+    font(9, true); c.textAlign = 'center';
+    c.strokeStyle = 'rgba(157,255,184,0.45)';
+    for (let i = 0; i < 12; i++) {
+      const a = nA + (i * Math.PI) / 6, len = i % 3 ? 3 : 6;
+      c.beginPath(); c.moveTo(cx + Math.sin(a) * R, cy - Math.cos(a) * R); c.lineTo(cx + Math.sin(a) * (R - len * sc), cy - Math.cos(a) * (R - len * sc)); c.stroke();
+    }
+    c.fillStyle = GREEN; c.fillText('N', cx + Math.sin(nA) * (R - 12 * sc), cy - Math.cos(nA) * (R - 12 * sc));
+    // ground units: targets, friendly ships
+    for (const g of S.gnd || []) {
+      let [x, y] = toMap(g.pos);
+      if (!inside(x, y, 3 * sc)) { if (!g.tgt) continue; [x, y] = clampRim(x, y, 4 * sc); }
+      const s = 3.2 * sc;
+      c.strokeStyle = g.friend ? CYAN : g.tgt ? RED : g.emit ? AMBER : GREEN;
+      c.beginPath();
+      if (g.friend) c.arc(x, y, s, 0, Math.PI * 2);
+      else { c.moveTo(x, y - s); c.lineTo(x + s, y); c.lineTo(x, y + s); c.lineTo(x - s, y); c.closePath(); }
+      c.stroke();
+    }
+    // mission points: waypoints, targets, home. Off-map ones sit on the rim so you can steer to them.
+    const MC = { wp: CYAN, target: RED, danger: AMBER, info: '#ffffff', home: GREEN };
+    const pts = (S.marks || []).map((m) => ({ pos: m.pos, col: MC[m.icon] || '#ffffff' }));
+    if (S.race && S.race.gate && !S.race.done) pts.push({ pos: S.race.gate, col: CYAN, gate: true });
+    for (const m of pts) {
+      const [x, y, off] = clampRim(...toMap(m.pos), 5 * sc);
+      const s = 3.6 * sc;
+      c.strokeStyle = m.col; c.fillStyle = m.col;
+      c.globalAlpha = off ? 0.6 : 1;
+      c.beginPath();
+      if (m.gate) c.arc(x, y, s, 0, Math.PI * 2);
+      else { c.moveTo(x, y + s); c.lineTo(x - s, y - s); c.lineTo(x + s, y - s); c.closePath(); }
+      c.stroke();
+      c.globalAlpha = 1;
+    }
+    // aircraft: same symbols as the radar scope, with a heading stick
+    font(9);
+    for (const t of S.contacts || []) {
+      const [x, y] = toMap(t.pos);
+      if (!inside(x, y, 2 * sc)) continue;
+      const friend = t.kind === 'friend';
+      const col = friend ? CYAN : t.kind === 'stt' ? RED : t.kind === 'dl' || t.kind === 'irst' ? AMBER : t.kind === 'eyes' ? '#ffffff' : GREEN;
+      c.strokeStyle = col; c.fillStyle = col;
+      c.globalAlpha = t.kind === 'mem' ? 0.45 : 1;
+      const s = (t.tgt ? 3.8 : 3) * sc;
+      c.beginPath();
+      if (friend) { c.arc(x, y, s, Math.PI, 0); c.stroke(); }
+      else if (t.kind === 'dl') { c.moveTo(x, y - s); c.lineTo(x + s, y + s); c.lineTo(x - s, y + s); c.closePath(); c.stroke(); }
+      else if (t.kind === 'irst') { c.arc(x, y, s, 0, Math.PI * 2); c.stroke(); }
+      else if (t.kind === 'stt') c.fillRect(x - s, y - s, 2 * s, 2 * s);
+      else c.strokeRect(x - s, y - s, 2 * s, 2 * s);
+      if (t.vel) {
+        const vx = t.vel.x * rx + t.vel.z * rz, vy = t.vel.x * fx + t.vel.z * fz, vl = Math.hypot(vx, vy);
+        if (vl > 20) { c.beginPath(); c.moveTo(x, y); c.lineTo(x + (vx / vl) * 8 * sc, y - (vy / vl) * 8 * sc); c.stroke(); }
+      }
+      if (t.tgt && !friend) { c.beginPath(); c.arc(x, y, s + 3 * sc, 0, Math.PI * 2); c.stroke(); c.textAlign = 'left'; c.fillText(`${Math.round(t.pos.y * 3.281 / 1000)}`, x + 7 * sc, y - 5 * sc); }
+      c.globalAlpha = 1;
+    }
+    // my missiles in flight
+    c.fillStyle = CYAN;
+    for (const p of S.myMsl || []) { const [x, y] = toMap(p); if (inside(x, y)) { c.beginPath(); c.arc(x, y, 1.6 * sc, 0, Math.PI * 2); c.fill(); } }
+    // missiles the warning system sees coming
+    font(10, true); c.textAlign = 'center';
+    for (const t of S.threats || []) {
+      const [x, y] = clampRim(...toMap(t.pos), 6 * sc);
+      c.fillStyle = blink ? RED : '#ffffff'; c.fillText('M', x, y);
+    }
+    // RWR: bearing only, so the emitter sits on the rim, not at a range
+    const T = S.threat;
+    if (T && T.emitters) {
+      font(9, true);
+      for (const e of T.emitters) {
+        const [x, y] = toMap(e.pos), a = Math.atan2(x - cx, cy - y);
+        const col = e.launch ? (blink ? RED : AMBER) : e.lock ? RED : AMBER;
+        c.strokeStyle = col; c.fillStyle = col; c.lineWidth = 2.2 * sc;
+        c.beginPath(); c.moveTo(cx + Math.sin(a) * (R - 7 * sc), cy - Math.cos(a) * (R - 7 * sc)); c.lineTo(cx + Math.sin(a) * (R + 2 * sc), cy - Math.cos(a) * (R + 2 * sc)); c.stroke();
+        c.lineWidth = 1.3 * sc;
+        c.fillText(e.code || 'F', cx + Math.sin(a) * (R + 10 * sc), cy - Math.cos(a) * (R + 10 * sc));
+      }
+    }
+    // own jet
+    c.fillStyle = '#ffffff';
+    c.beginPath(); c.moveTo(cx, cy - 6 * sc); c.lineTo(cx + 4.5 * sc, cy + 4 * sc); c.lineTo(cx, cy + 2 * sc); c.lineTo(cx - 4.5 * sc, cy + 4 * sc); c.closePath(); c.fill();
+    // range and heading
+    font(10); c.fillStyle = 'rgba(157,255,184,0.75)';
+    c.textAlign = 'left'; c.fillText(`${range / 1000}`, cx + R * 0.72, cy - R * 0.86);
+    c.textAlign = 'right'; c.fillText(`${String(Math.round(((Math.atan2(fx, -fz) * 180) / Math.PI + 360) % 360)).padStart(3, '0')}°`, cx - R * 0.66, cy - R * 0.86);
+    c.textAlign = 'center'; font(9); c.fillText('MAP · O', cx, cy + R + 10 * sc);
+    c.restore();
   }
 
   // Radar warning receiver: who is painting us and from where. Bearing only, no range.

@@ -220,6 +220,21 @@ export function buildUnitMesh(D, country) {
 const _rel = new THREE.Vector3(), _aim = new THREE.Vector3(), _sp = new THREE.Vector3(), _t = new THREE.Vector3();
 const _fo = new Map();
 function fo(key, rho) { const k = key + ':' + Math.round(rho * 10); if (!_fo.has(k)) _fo.set(k, flyout(key, 30, rho)); return _fo.get(k); }
+// Threat ring for the tactical map: how far out this kind of site can reach a jet flying toward it
+// at medium altitude (its missile's launch range, capped by its own radar), or its gun range.
+const _ring = new Map();
+export function threatRing(D) {
+  if (_ring.has(D)) return _ring.get(D);
+  let r = 0;
+  if (D.msl && WEAPONS[D.msl]) {
+    const w = WEAPONS[D.msl], lz = launchZone(fo(D.msl, airDensity(3000)), 200, 250);
+    r = (w.guidance === 'ir' ? Math.min(lz.rMax, w.seeker * 0.95) : lz.rMax) * 0.85;
+    if (D.radar) r = Math.min(r, D.radar.range);
+  }
+  if (D.gun) r = Math.max(r, D.gunRange || 0);
+  _ring.set(D, r);
+  return r;
+}
 
 export class Unit {
   // spec: { key, x, z, hdg (deg), side, name, country, emcon ('on' | 'ambush'), route: [[x, z], ...] }

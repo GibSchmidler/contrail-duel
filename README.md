@@ -98,8 +98,11 @@ The other tabs build missions. Everything with a position can be placed and drag
 | U (hold) | Look at your nearest wingman (tap again within 2 s for the next) |
 | , · . · / (hold) | Snap view left · right · up (also numpad 4 · 6 · 8) |
 | V | Chase / cockpit view |
+| O | Tactical map range: 10 · 20 · 40 · 80 km · off |
 | P | Free camera when spectating or watching a replay (WASD, R/F up/down, drag the mouse to look, wheel for speed) |
 | Esc · H | Pause · help |
+
+The **tactical map** (bottom right, like an F-16's HSD or a Hornet's SA page) is heading-up with your jet in the middle. It only shows what your jet knows: your own radar, IRST and visual tracks (green squares, amber circles, white), datalink tracks from wingmen and AWACS (amber triangles), wingmen (cyan), your missiles in flight, incoming missiles the warner sees (M), radar warnings as bearing ticks on the rim (an RWR gives direction, not range), threat rings for SAM and AAA sites you know about (solid red while their radar is up, dashed when silent), mission waypoints and targets (pinned to the rim when off the map) and your radar's coverage. A stealthy jet your radar can't see won't be on it.
 
 In a replay: Space pauses, Q / E skip 10 s, R / F change speed, N follows the next jet, M follows a missile (the next one in flight, or skips ahead to the next launch), Esc returns to the debrief.
 

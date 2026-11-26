@@ -33,6 +33,7 @@ const BINDS = {
   lookLeft: ['Comma', 'Numpad4'],
   lookRight: ['Period', 'Numpad6'],
   lookUp: ['Slash', 'Numpad8'],
+  map: ['KeyO'],
   cycle: ['KeyN'],
   pause: ['Escape'],
   help: ['KeyH'],
