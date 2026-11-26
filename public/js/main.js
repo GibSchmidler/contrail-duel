@@ -17,6 +17,7 @@ import { sanitizeArt } from './noseart.js';
 import { JETS, COUNTRIES, JETS_OF, jetOf, DEFAULT_JET } from './aircraft.js';
 import { Wrecks } from './wreck.js';
 import { Input } from './input.js';
+import { TouchControls, isTouchDevice } from './touch.js';
 import { AIPilot } from './ai.js';
 import { Hud } from './hud.js';
 import { Audio } from './audio.js';
@@ -67,6 +68,7 @@ const unitView = new UnitView(scene, effects);
 const audio = new Audio();
 const hud = new Hud($('hud'));
 const input = new Input();
+const touch = new TouchControls(input);
 const net = new Net();
 
 let W = 1, H = 1;
@@ -75,6 +77,7 @@ function resize() {
   renderer.setSize(W, H, false);
   camera.aspect = W / H; camera.updateProjectionMatrix();
   hud.resize(W, H, Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouchDevice() ? 1.5 : 2));   // phones: fewer pixels, steadier frame rate
   effects.setViewport(H * renderer.getPixelRatio(), camera.fov);
 }
 window.addEventListener('resize', resize);
@@ -1206,7 +1209,31 @@ function frame(now) {
   });
 
   if (!G.noRender) renderer.render(scene, camera);
+  if (touch.on) touch.update(touchState(inGame, P));
+  // phone turned upright mid-flight: pause single-player games until it's sideways again
+  if (touch.on && inGame && G.mode === 'ai' && !G.paused && !G.replay && P && P.alive && window.innerHeight > window.innerWidth * 1.1) togglePause();
+  hud.touch = touch.on;
   input.endFrame();
+}
+
+// What the touch buttons show: the selected weapon and counts, flares, chaff, lock state, radio menu.
+function touchState(inGame, P) {
+  const menu = document.body.classList.contains('in-menu');
+  const s = { show: inGame && (!G.replay || G.freeCam) && !menu && G.phase !== 'menu', alive: !!(P && P.alive) && !G.replay, freeCam: !!G.freeCam };
+  if (!s.show || !s.alive) return s;
+  if (P.weapon === 'ag') {
+    const w = WEAPONS[P.agKey];
+    s.wpn = 'A/G'; s.fire = w ? `${w.short || w.name} ×${countKey(P.stores, P.agKey)}` : '—';
+  } else {
+    const cls = P.weapon === 'mrm' ? 'mrm' : 'srm', k = firstOf(P.stores, cls);
+    s.wpn = cls === 'mrm' ? 'RADAR' : 'IR'; s.fire = k ? `${WEAPONS[k].short || WEAPONS[k].name} ×${countOf(P.stores, cls)}` : 'none';
+  }
+  s.gun = P.T.gun === 'none' ? 'none' : String(P.gunAmmo);
+  s.flr = String(P.flares); s.chf = String(P.chaff);
+  s.lock = P.radar && P.radar.stt ? 'LOCKED' : P.wantStt ? 'ACQ…' : '';
+  s.radio = G.radioMenu ? RADIO.map((r) => r[1]) : null;
+  s.gear = input.gear; s.flaps = input.flaps; s.brake = input.brake;
+  return s;
 }
 
 function sideHome(k) { const s = G.scn.sides[k]; return new THREE.Vector3(s.x * 0.6, 3000, s.z * 0.6); }
@@ -1388,6 +1415,14 @@ function step(dt, now) {
     else if (P.alive && !G.paused && G.radioMenu) radioMenu(me);
     else if (P.alive && !G.paused) {
       playerTargeting(P, picture, dt, P.weapon === 'ag');
+      if (input.tapped('wpnCycle')) {
+        // one touch button steps through IR missile → radar missile → each air-to-ground store
+        const kinds = agKinds(P.stores), hasM = countOf(P.stores, 'mrm') > 0;
+        const next = P.weapon === 'srm' ? (hasM ? 'mrm' : kinds.length ? 'ag' : 'srm')
+          : P.weapon === 'mrm' ? (kinds.length ? 'ag' : 'srm')
+          : kinds.indexOf(P.agKey) < kinds.length - 1 ? 'ag' : 'srm';
+        input.press(next === 'srm' ? 'Digit1' : next === 'mrm' ? 'Digit2' : 'Digit3'); input.release(next === 'srm' ? 'Digit1' : next === 'mrm' ? 'Digit2' : 'Digit3');
+      }
       if (input.tapped('selAg')) {
         const kinds = agKinds(P.stores);
         if (!kinds.length) flash(JETS[P.type].loadouts.strike || JETS[P.type].loadouts.cas ? 'NO A/G STORES — pick a strike loadout in the hangar' : 'NO A/G STORES', 1.6);
@@ -1665,7 +1700,8 @@ function drawHud(dt) {
     myMrm.push(status);
   }
   let hint = null;
-  if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · 1/2 IR / radar missile · N next target · TAB lock · X fire · C/Z flares/chaff · H help';
+  if (G.phase === 'countdown' && G.round === 1 && touch.on) hint = 'Left thumb: stick · right: throttle lever, FIRE, GUN, WPN cycles weapons · drag empty screen to look';
+  else if (G.phase === 'countdown' && G.round === 1) hint = 'W/S pitch · A/D roll · Q/E rudder · R/F throttle · SPACE gun · 1/2 IR / radar missile · N next target · TAB lock · X fire · C/Z flares/chaff · H help';
   hud.draw({
     ...base, plane: P, myName: (settings.name || 'YOU').toUpperCase(),
     radar: R, padlock: G.padlock, irst: P.irst, contacts, tgt: tgtInfo, blips, oppDist: tgtInfo ? tgtInfo.dist : 0,
@@ -2002,6 +2038,7 @@ function toggleFreeCam() {
   G.freeCam = !G.freeCam;
   if (G.freeCam) { const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ'); fc.yaw = e.y; fc.pitch = e.x; flash('FREE CAMERA — P to exit', 1.6); }
 }
+const _lv = new THREE.Vector3();
 function freeCamUpdate(dt) {
   const k = (c) => input.down.has(c), m = input.mouse;
   fc.yaw -= m.dx * 0.0035 + ((k('ArrowRight') ? 1 : 0) - (k('ArrowLeft') ? 1 : 0)) * dt * 1.4;
@@ -2010,6 +2047,7 @@ function freeCamUpdate(dt) {
   camera.up.set(0, 1, 0);
   camera.quaternion.setFromEuler(new THREE.Euler(fc.pitch, fc.yaw, 0, 'YXZ'));
   _rv.set((k('KeyD') ? 1 : 0) - (k('KeyA') ? 1 : 0), 0, (k('KeyS') ? 1 : 0) - (k('KeyW') ? 1 : 0)).applyQuaternion(camera.quaternion);
+  if (input.stick.active) _rv.add(_lv.set(input.stick.x, 0, input.stick.y).applyQuaternion(camera.quaternion));   // touch: stick flies the camera
   _rv.y += (k('KeyR') ? 1 : 0) - (k('KeyF') ? 1 : 0);
   const sp = fc.speed * (k('ShiftLeft') || k('ShiftRight') ? 5 : 1);
   camera.position.addScaledVector(_rv, sp * dt);
@@ -2368,7 +2406,7 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile,
+window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile, killPlane, touch,
   // advance the game n frames of 1/60 s (for testing when the tab is in the background)
   get acc() { return acc; },
   tick(n = 60) { G.noRender = true; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },

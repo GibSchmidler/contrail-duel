@@ -34,6 +34,7 @@ const BINDS = {
   lookRight: ['Period', 'Numpad6'],
   lookUp: ['Slash', 'Numpad8'],
   map: ['KeyO'],
+  wpnCycle: ['TouchWpn'],
   cycle: ['KeyN'],
   pause: ['Escape'],
   help: ['KeyH'],
@@ -63,6 +64,7 @@ export class Input {
     this.trim = 0; this.flaps = 0; this.gear = false; this.brake = false;
     this.enabled = true;
     this.mouse = { dx: 0, dy: 0, down: false, wheel: 0 };
+    this.stick = { x: 0, y: 0, active: false };   // touch joystick, -1..1 (y down = pull back)
     window.addEventListener('mousemove', (e) => { if (this.mouse.down) { this.mouse.dx += e.movementX; this.mouse.dy += e.movementY; } });
     window.addEventListener('mousedown', (e) => { if (e.target && e.target.id === 'hud') this.mouse.down = true; });
     window.addEventListener('mouseup', () => { this.mouse.down = false; });
@@ -76,6 +78,10 @@ export class Input {
     window.addEventListener('keyup', (e) => { this.down.delete(e.code); });
     window.addEventListener('blur', () => { this.down.clear(); });
   }
+
+  // virtual keys from the touch buttons
+  press(code) { if (!this.down.has(code)) this.pressed.add(code); this.down.add(code); }
+  release(code) { this.down.delete(code); }
 
   held(action) { return BINDS[action].some((k) => this.down.has(k)); }
   tapped(action) { return BINDS[action].some((k) => this.pressed.has(k)); }
@@ -96,8 +102,13 @@ export class Input {
     if (this.tapped('gear')) this.gear = !this.gear;
     if (this.tapped('airbrake')) this.brake = !this.brake;
     let p = (this.held('noseUp') ? 1 : 0) - (this.held('noseDown') ? 1 : 0);
+    let r = (this.held('rollRight') ? 1 : 0) - (this.held('rollLeft') ? 1 : 0);
+    if (this.stick.active) {
+      // touch joystick: small dead zone, then a curve so small thumb movements give fine control
+      const curve = (v) => { const a = Math.min(1, Math.abs(v)); return a < 0.08 ? 0 : Math.sign(v) * Math.pow((a - 0.08) / 0.92, 1.6); };
+      p = curve(this.stick.y); r = curve(this.stick.x);
+    }
     if (this.invertPitch) p = -p;
-    const r = (this.held('rollRight') ? 1 : 0) - (this.held('rollLeft') ? 1 : 0);
     const y = (this.held('yawRight') ? 1 : 0) - (this.held('yawLeft') ? 1 : 0);
     const precision = this.held('precision');
     const ps = precision ? 0.3 : 1, rs = precision ? 0.3 : 1, ys = precision ? 0.6 : 1;

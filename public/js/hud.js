@@ -35,7 +35,8 @@ export class Hud {
     c.clearRect(0, 0, w, h);
     if (!S.active) return;
     const P = S.plane;
-    const scale = Math.min(1.25, Math.max(0.75, h / 900));
+    // touch screens are small and thumbs cover the bottom corners, so the HUD is smaller and rearranged
+    const scale = this.touch ? Math.min(1, Math.max(0.55, h / 620)) : Math.min(1.25, Math.max(0.75, h / 900));
     c.lineWidth = 1.6 * scale;
     c.font = `${Math.round(15 * scale)}px "Consolas","Menlo",monospace`;
     c.textBaseline = 'middle';
@@ -365,9 +366,10 @@ export class Hud {
 
   weapons(S, sc) {
     const c = this.ctx, P = S.plane, w = this.w, h = this.h;
+    const T = this.touch;
     const x = w - 24 * sc;
     const lh = 20 * sc;
-    let y = h - 176 * sc - (S.ag ? lh : 0);
+    let y = T ? (S.map && this.mapBottom ? this.mapBottom + 16 * sc : 60 * sc) : h - 176 * sc - (S.ag ? lh : 0);
     c.textAlign = 'right';
     c.font = `${Math.round(15 * sc)}px "Consolas","Menlo",monospace`;
     // remember which types this jet started with so the rows keep their names at zero
@@ -378,11 +380,13 @@ export class Hud {
       c.fillStyle = !ok ? RED : sel ? '#ffffff' : 'rgba(157,255,184,0.75)';
       c.fillText((sel ? '▸ ' : '') + txt, x, y); y += lh;
     };
-    row(`1 SRM ${srm ? WEAPONS[srm].name : '—'} ×${nS}`, P.weapon === 'srm', nS > 0);
-    row(`2 MRM ${mrm ? WEAPONS[mrm].name : '—'} ×${nM}`, P.weapon === 'mrm', nM > 0 || P.weapon !== 'mrm');
-    if (S.ag) row(`3 ${S.ag.cls} ${S.ag.name} ×${S.ag.n}${S.ag.kinds > 1 ? ' +' : ''}`, P.weapon === 'ag', S.ag.n > 0);
-    row(P.T.gun === 'none' ? 'NO GUN' : `GUN ${P.gunT.name.split(' ')[0]} ${P.gunAmmo}`, false, P.gunAmmo > 0);
-    row(`FLR ${P.flares}  CHF ${P.chaff}`, false, P.flares > 0 || P.chaff > 0);
+    if (!T) {
+      row(`1 SRM ${srm ? WEAPONS[srm].name : '—'} ×${nS}`, P.weapon === 'srm', nS > 0);
+      row(`2 MRM ${mrm ? WEAPONS[mrm].name : '—'} ×${nM}`, P.weapon === 'mrm', nM > 0 || P.weapon !== 'mrm');
+      if (S.ag) row(`3 ${S.ag.cls} ${S.ag.name} ×${S.ag.n}${S.ag.kinds > 1 ? ' +' : ''}`, P.weapon === 'ag', S.ag.n > 0);
+      row(P.T.gun === 'none' ? 'NO GUN' : `GUN ${P.gunT.name.split(' ')[0]} ${P.gunAmmo}`, false, P.gunAmmo > 0);
+      row(`FLR ${P.flares}  CHF ${P.chaff}`, false, P.flares > 0 || P.chaff > 0);
+    }
     // radar status + my AMRAAMs in flight
     const R = S.radar;
     c.fillStyle = R.stt ? RED : R.contact ? GREEN : 'rgba(157,255,184,0.6)';
@@ -392,7 +396,7 @@ export class Hud {
     if (P.irst && P.T.irst) { c.fillStyle = P.irst.contact ? AMBER : 'rgba(157,255,184,0.6)'; c.fillText(P.irst.contact ? 'IRST TRK' : 'IRST SRCH', x, y); }
 
     // own hull
-    const bx = 24 * sc, by = h - 70 * sc, bw = 180 * sc;
+    const bw = (T ? 130 : 180) * sc, bx = T ? w / 2 - bw / 2 : 24 * sc, by = T ? h - 122 * sc : h - 70 * sc;
     c.textAlign = 'left'; c.fillStyle = GREEN;
     c.fillText('HULL', bx, by - 14 * sc);
     c.strokeStyle = GREEN; c.strokeRect(bx, by, bw, 10 * sc);
@@ -456,7 +460,8 @@ export class Hud {
     if (!range) return;
     const c = this.ctx, P = S.plane, w = this.w, h = this.h;
     const R = Math.round(Math.min(84 * sc, w * 0.075));
-    const cx = w - 24 * sc - R, cy = h - 176 * sc - (S.ag ? 20 * sc : 0) - 30 * sc - R;
+    const cx = w - (this.touch ? 18 : 24) * sc - R, cy = this.touch ? 30 * sc + R : h - 176 * sc - (S.ag ? 20 * sc : 0) - 30 * sc - R;
+    this.mapBottom = cy + R + 12 * sc;
     // heading-up frame from the horizontal part of the nose (keep the last one when pointing straight up/down)
     let fx = P.fwd.x, fz = P.fwd.z;
     const fl = Math.hypot(fx, fz);
@@ -630,7 +635,7 @@ export class Hud {
     const D = S.dlz, c = this.ctx, P = S.plane;
     if (!D || !S.tgt || S.tgt.kind === 'irst') return;
     const range = S.tgt.dist;
-    const x = this.w / 2 + 300 * sc + 110 * sc, top = this.h / 2 - 110 * sc, H = 220 * sc;
+    const x = this.w / 2 + 300 * sc + (this.touch ? 80 : 110) * sc, top = this.h / 2 - (this.touch ? 150 : 110) * sc, H = (this.touch ? 130 : 220) * sc;
     const full = Math.max(D.rMax * 1.25, Math.min(range * 1.1, D.rMax * 2.5));
     const yOf = (r) => top + H * (1 - Math.min(1, r / full));
     c.strokeStyle = GREEN; c.fillStyle = GREEN; c.lineWidth = 1.6 * sc;
@@ -704,10 +709,11 @@ export class Hud {
     // kill feed
     c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'right';
     let fy = 22 * sc;
+    const fx = this.touch && S.map && S.plane && S.plane.alive ? w - Math.round(Math.min(84 * sc, w * 0.075)) * 2 - 40 * sc : w - 18 * sc;
     for (const f of S.feed || []) {
       c.globalAlpha = Math.min(1, f.t);
       c.fillStyle = f.color || '#ffffff';
-      c.fillText(f.text, w - 18 * sc, fy); fy += 18 * sc;
+      c.fillText(f.text, fx, fy); fy += 18 * sc;
     }
     c.globalAlpha = 1;
     if (S.spectate) {
@@ -801,10 +807,14 @@ export class Hud {
   systems(S, sc) {
     const c = this.ctx, Y = S.sys;
     if (!Y) return;
-    const x = 24 * sc;
-    let y = this.h - 120 * sc;
+    // touch: one line beside the GEAR / FLAP / BRK buttons; keyboard: a column bottom left
+    let x = this.touch ? 222 : 24 * sc, y = this.touch ? 52 : this.h - 120 * sc;
     c.textAlign = 'left'; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
-    const tag = (txt, col) => { c.fillStyle = col; c.fillText(txt, x, y); y -= 17 * sc; };
+    const tag = (txt, col) => {
+      if (!txt) return;
+      c.fillStyle = col; c.fillText(txt, x, y);
+      if (this.touch) x += c.measureText(txt).width + 12 * sc; else y -= 17 * sc;
+    };
     if (Y.fire) tag(Math.floor(this.flashT * 4) % 2 ? 'FIRE!' : '', RED);
     if (Y.gear) tag(Y.gearOver ? 'GEAR — OVERSPEED' : 'GEAR DOWN', Y.gearOver ? RED : GREEN);
     if (Y.flaps > 0) tag(`FLAPS ${Y.flaps === 1 ? 'FULL' : 'HALF'}${Y.flapsOver ? ' — BLOWN UP' : ''}`, Y.flapsOver ? AMBER : GREEN);
@@ -814,7 +824,7 @@ export class Hud {
     const D = Y.dmg;
     if (!D || !Object.values(D).some((v) => v > 0.02)) return;
     const col = (v) => (v >= 1 ? RED : v >= 0.5 ? AMBER : v > 0.02 ? '#e8f070' : 'rgba(157,255,184,0.5)');
-    const cx = 230 * sc, cy = this.h - 112 * sc, k = sc * 1.1;
+    const cx = this.touch ? 30 + 40 * sc : 230 * sc, cy = this.touch ? this.h * 0.47 : this.h - 112 * sc, k = sc * 1.1;
     c.lineWidth = 2 * sc;
     const poly = (pts, v) => { c.fillStyle = col(v); c.beginPath(); pts.forEach(([px, py], i) => (i ? c.lineTo : c.moveTo).call(c, cx + px * k, cy + py * k)); c.closePath(); c.fill(); };
     poly([[-4, -34], [4, -34], [5, -22], [-5, -22]], D.radar);            // nose / radar
@@ -849,8 +859,8 @@ export class Hud {
   mission(S, sc) {
     const c = this.ctx, w = this.w, h = this.h;
     c.textAlign = 'left'; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
-    let y = 96 * sc;
-    const x = 18 * sc;
+    let y = this.touch ? 84 : 96 * sc;
+    const x = this.touch ? 10 : 18 * sc;
     if (S.missionTitle) { c.fillStyle = '#ffffff'; c.fillText(S.missionTitle, x, y); y += 19 * sc; }
     for (const o of S.obj || []) {
       const mark = o.state === 'done' ? '✔' : o.state === 'failed' ? '✖' : '▢';
@@ -984,6 +994,7 @@ export class Hud {
   }
 
   radioMenu(S, sc) {
+    if (this.touch) return;   // touch screens get a tappable list instead
     if (!S.radio) return;
     const c = this.ctx, x = 18 * sc;
     let y = this.h * 0.42;

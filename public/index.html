@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0b1520">
   <title>Contrail Duel</title>
   <link rel="stylesheet" href="style.css">
   <script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
@@ -15,7 +19,7 @@
   <div id="menu" class="screen">
     <div class="panel wide">
       <h1>CONTRAIL <span>DUEL</span></h1>
-      <p class="tag">Modern air combat · 4 nations · 13 fighters · up to 8 pilots and 16 jets · keyboard only</p>
+      <p class="tag">Modern air combat · 4 nations · 13 fighters · up to 8 pilots and 16 jets · keyboard or touch</p>
 
       <div id="hangarHome">
       <section id="hangar">
@@ -171,6 +175,7 @@
   <div id="help">
     <div class="panel wide">
       <h2>Controls</h2>
+      <p class="small touchonly"><b>Touch:</b> put your left thumb down anywhere on the left half and drag. That's the stick: pull down to pull the nose up, sideways to roll. On the right: the throttle lever (the top band is afterburner), <b>FIRE</b> (the selected missile or bomb), <b>GUN</b>, <b>WPN</b> (cycles IR missile, radar missile and air-to-ground stores), <b>LOCK</b> (radar lock), <b>TGT</b> (next target), <b>FLR</b> and <b>CHF</b>. Drag on empty screen on the right to look around. The top-left buttons pause, change the view, set the map range, open the wingman radio, and work the gear, flaps, speedbrake and look-back. Hold your phone sideways.</p>
       <div class="grid">
         <table>
           <tr><td><kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd></td><td>Pitch (S pulls by default)</td></tr>
