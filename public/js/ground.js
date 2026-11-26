@@ -280,7 +280,7 @@ export class Unit {
     const d = p.pos.distanceTo(sp);
     const agl = p.pos.y - groundHeight(p.pos.x, p.pos.z);
     if (D.radar && this.radarMode > 0) {
-      if (d > detectRange(D.radar.range, p, 0.2)) return false;
+      if (d > detectRange(D.radar.range, p, 0.2, sp, !!D.ewr)) return false;
       if (agl < (D.minAgl || 30) && d > 3000) return false;              // ground clutter hides very low flyers
       if (inNotch(sp, p, D.radar.notchVr)) return false;
       return lineOfSight(sp, p.pos, 5);

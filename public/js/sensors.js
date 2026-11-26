@@ -22,13 +22,60 @@ export function inNotch(sensorPos, target, notchVr = RADAR.notchVr) {
   const lookDown = target.pos.y < sensorPos.y - 60;
   return lookDown && Math.abs(radialSpeed(sensorPos, target)) < notchVr;
 }
-// How far a radar (or radar seeker) of nominal range `range` sees this target:
-// stealth shrinks it with the fourth root of RCS, jamming takes a further bite.
-export function detectRange(range, target, ccm = 0) {
+// Radar cross-section as seen from a sensor at `from`. Stealth shaping works best head-on: the
+// sides and the tail reflect much more (every jet is bigger from the side). Opening the weapon
+// bays to fire lights a stealth jet up for a moment.
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const _asp = new THREE.Vector3();
+export function rcsAt(target, from) {
   const T = target.T;
-  if (!T) return range;
-  const jam = 1 - 0.35 * T.ecm * (1 - Math.max(0, ccm));
-  return range * rcsFactor(T.rcs) * jam;
+  let rcs = T.rcs;
+  if (from && target.fwd) {
+    _asp.copy(from).sub(target.pos);
+    const d = _asp.length();
+    if (d > 1) {
+      const c = target.fwd.dot(_asp.divideScalar(d));          // 1: the sensor is dead ahead of the target
+      const side = T.rcsSide ?? 4, rear = T.rcsRear ?? 2.5;
+      rcs *= c >= 0 ? side + (1 - side) * sstep(0.5, 0.94, c) : side + (rear - side) * sstep(0.5, 0.94, -c);
+    }
+  }
+  if (target.bayUntil && performance.now() < target.bayUntil) rcs = Math.max(rcs, T.rcsBay ?? 0.15);
+  return rcs;
+}
+// How far a radar (or radar seeker) of nominal range `range` sees this target: stealth shrinks it
+// with the fourth root of RCS, jamming takes a further bite. Long-wave (VHF) early-warning radars
+// are much less fooled by stealth shaping, though they can't guide weapons.
+export function detectRange(range, target, ccm = 0, from = null, vhf = false) {
+  const T = target.T;
+  if (!T || T.rcs == null) return range;
+  const jam = 1 - 0.35 * (T.ecm || 0) * (1 - Math.max(0, ccm));
+  let rcs = rcsAt(target, from);
+  if (vhf) rcs = Math.max(rcs, Math.min(T.rcs * 4, 0.4));
+  return range * rcsFactor(rcs) * jam;
+}
+
+// Spotting a jet by eye: a fighter shows up at a few km head-on, further when you see its wings
+// from above or below, or when it is big; the weather and darkness cap it. Nobody sees straight
+// behind their own tail, and the nose blocks the view low ahead.
+export function eyeRange(observer, target) {
+  const vis = visRange();
+  _u.copy(observer.pos).sub(target.pos);
+  const d = _u.length();
+  if (d < 1) return vis;
+  _u.divideScalar(d);                                          // target -> observer
+  const plan = target.up ? Math.abs(target.up.dot(_u)) : 0.4;
+  let r = 5200 * (target.T ? target.T.size || 1 : 1) * (0.7 + 0.75 * plan);
+  if (target.ab) r *= 1.15;
+  if (observer.fwd) {
+    const ahead = -observer.fwd.dot(_u), below = observer.up ? -observer.up.dot(_u) : 0;
+    if (ahead < -0.9) return 0;                                // inside the blind cone at your six
+    if (ahead > 0.3 && below < -0.45) r *= 0.35;               // hidden under the nose
+  }
+  return Math.min(vis, r);
+}
+export function canSee(observer, target) {
+  const d = observer.pos.distanceTo(target.pos);
+  return d < eyeRange(observer, target) && lineOfSight(observer.pos, target.pos);
 }
 // 1 when beaming (zero radial speed), 0 when flying straight at/away from the sensor.
 export function notchFactor(sensorPos, target) {
@@ -44,7 +91,7 @@ export function radarSees(plane, target) {
   _rel.copy(target.pos).sub(plane.pos);
   const dist = _rel.length();
   const lookDown = target.pos.y < plane.pos.y - 60;
-  if (dist > detectRange(RT.range, target, RT.ccm) * (lookDown ? RT.lookDown : 1) * (1 - 0.6 * rd)) return false;
+  if (dist > detectRange(RT.range, target, RT.ccm, plane.pos) * (lookDown ? RT.lookDown : 1) * (1 - 0.6 * rd)) return false;
   if (_rel.divideScalar(dist).dot(plane.fwd) < Math.cos(RT.gimbal)) return false;
   if (inNotch(plane.pos, target, RT.notchVr)) return false;
   return lineOfSight(plane.pos, target.pos); // radar can't see through a mountain
@@ -201,7 +248,7 @@ export function scanContacts(plane, enemies, dt) {
       _rel.copy(e.pos).sub(plane.pos).divideScalar(d || 1);
       irst = _rel.dot(plane.fwd) > Math.cos(1.05) && lineOfSight(plane.pos, e.pos);
     }
-    const eyes = d < vis && (radar || irst || lineOfSight(plane.pos, e.pos));
+    const eyes = d < Math.min(vis, eyeRange(plane, e)) && (radar || irst || lineOfSight(plane.pos, e.pos));
     let c = C.get(e);
     if (radar || irst || eyes) {
       if (!c) { c = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), mem: 0 }; C.set(e, c); }

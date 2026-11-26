@@ -4,7 +4,7 @@ import { World, groundHeight, ARENA_RADIUS, visRange, lineOfSight } from './worl
 import { buildJet, addNoseArt } from './models.js';
 import { Effects } from './effects.js';
 import { Combat } from './weapons.js';
-import { updateRadar, updateIrLock, updateIrst, scanContacts, datalinkPicture, assessThreatsMulti } from './sensors.js';
+import { updateRadar, updateIrLock, updateIrst, scanContacts, datalinkPicture, assessThreatsMulti, canSee, radialSpeed, inNotch } from './sensors.js';
 import { WEAPONS, GUNS, RADARS, firstOf, countOf, nextStation, flyout, launchZone, agKinds, countKey, AG_LABEL } from './arsenal.js';
 import { Unit, UnitView, packUnits, applyUnits, UNITS } from './ground.js';
 import { impactPoint, stationOf, scanGround, pickGround, releaseCheck, updateAgLock } from './strike.js';
@@ -28,7 +28,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // ---------------- settings + saved scenarios ----------------
-const settings = Object.assign({ name: 'Viper', invert: false, sound: true, jet: DEFAULT_JET, loadout: 'air', scenario: 'duel-bvr' }, (() => {
+const settings = Object.assign({ name: 'Viper', invert: false, sound: true, coach: true, jet: DEFAULT_JET, loadout: 'air', scenario: 'duel-bvr' }, (() => {
   try { return JSON.parse(localStorage.getItem('contrail-settings') || '{}'); } catch { return {}; }
 })());
 if (!JETS[settings.jet]) settings.jet = DEFAULT_JET;
@@ -90,7 +90,7 @@ const G = {
   role: 'host', myId: 0, hostId: 0, room: null, lobby: null,
   scn: null, ents: [], byId: {}, mine: null, sides: [[], []],
   rw: [0, 0], round: 0, roundT: 0,
-  paused: false, camMode: 'chase', padlock: false, camQuat: new THREE.Quaternion(),
+  paused: false, camMode: 'chase', padlock: false, camQuat: new THREE.Quaternion(), look: { yaw: 0, pitch: 0, my: 0, mp: 0, wing: null, wingT: 0, wasWing: false, back: 0 },
   sendT: 0, aiSendT: 0, phaseSendT: 0, time: 0,
   netId: Math.random().toString(36).slice(2, 7),
   msg: '', msgT: 0, attract: 0, dlz: null, dlzT: 0, threat: null,
@@ -992,6 +992,7 @@ function spectateCandidates() {
   return friends.length ? friends : alive;
 }
 
+const _lq2 = new THREE.Quaternion(), _le = new THREE.Euler();
 function updateCamera(dt) {
   const P = myPlane();
   if (G.freeCam && P && P.alive && !G.replay) G.freeCam = false;
@@ -1055,10 +1056,37 @@ function updateCamera(dt) {
   }
   const target = P.tgt && P.tgt.alive && P.contacts && (P.contacts.has(P.tgt) || P.radar.contact) ? P.tgt : null;
   const lookBack = input.held('lookBack');
-  if (G.padlock && target) { _m4.lookAt(P.pos, target.pos, P.up); _q.setFromRotationMatrix(_m4); }
+  // free look: drag the mouse to look around, or hold , . / for snap views; release to snap back
+  const L = G.look, m = input.mouse;
+  if (input.tapped('lookWing')) {
+    const fr = G.sides[G.mine.side].filter((e) => e !== G.mine && e.plane.alive).sort((a, b) => a.plane.pos.distanceTo(P.pos) - b.plane.pos.distanceTo(P.pos));
+    const again = performance.now() - L.wingT < 2500 && L.wing && fr.includes(L.wing);
+    L.wing = fr.length ? (again ? fr[(fr.indexOf(L.wing) + 1) % fr.length] : fr[0]) : null;
+    flash(L.wing ? `LOOKING AT ${L.wing.name} · ${(L.wing.plane.pos.distanceTo(P.pos) / 1000).toFixed(1)} km${fr.length > 1 ? ' — tap U again for the next' : ''}` : 'NO WINGMAN TO LOOK AT', 1.4);
+  }
+  if (input.held('lookWing')) L.wingT = performance.now();
+  const wing = input.held('lookWing') && L.wing && L.wing.plane.alive ? L.wing.plane : null;
+  let ty = 0, tp = 0;
+  if (m.down) { L.my = Math.max(-2.9, Math.min(2.9, L.my - m.dx * 0.004)); L.mp = Math.max(-1.1, Math.min(1.45, L.mp - m.dy * 0.004)); ty = L.my; tp = L.mp; }
+  else {
+    L.my = L.mp = 0;
+    if (input.held('lookLeft')) { ty = 1.6; tp = 0.12; } else if (input.held('lookRight')) { ty = -1.6; tp = 0.12; }
+    if (input.held('lookUp')) tp = 1.25;
+  }
+  const kl = m.down ? 1 : 1 - Math.exp(-dt * 10);
+  L.yaw += (ty - L.yaw) * kl; L.pitch += (tp - L.pitch) * kl;
+  const looking = Math.abs(L.yaw) > 0.002 || Math.abs(L.pitch) > 0.002;
+  if (wing) { _m4.lookAt(P.pos, wing.pos, P.up); _q.setFromRotationMatrix(_m4); }
+  else if (G.padlock && target) { _m4.lookAt(P.pos, target.pos, P.up); _q.setFromRotationMatrix(_m4); }
   else if (lookBack) _q.copy(P.quat).multiply(FLIP);
-  else { _q.copy(P.quat); if (G.camMode === 'chase') _q.multiply(PITCH_DOWN); }
-  const k = G.camMode === 'cockpit' && !G.padlock && !lookBack ? 1 : 1 - Math.exp(-dt * (G.padlock ? 7 : 9));
+  else {
+    _q.copy(P.quat);
+    if (looking) _q.multiply(_lq2.setFromEuler(_le.set(L.pitch, L.yaw, 0, 'YXZ')));
+    if (G.camMode === 'chase') _q.multiply(PITCH_DOWN);
+  }
+  if (L.wasWing && !wing) L.back = 0.35;   // ease back from the wingman instead of jumping
+  L.wasWing = !!wing; L.back = Math.max(0, L.back - dt);
+  const k = G.camMode === 'cockpit' && !G.padlock && !lookBack && !wing && L.back <= 0 ? 1 : 1 - Math.exp(-dt * (G.padlock || wing ? 7 : 9));
   G.camQuat.slerp(_q, k);
   camera.quaternion.copy(G.camQuat);
   if (G.camMode === 'cockpit') camera.position.copy(P.pos).addScaledVector(P.up, 1.5).addScaledVector(P.fwd, 4.3);
@@ -1424,7 +1452,7 @@ function step(dt, now) {
     updateRadar(pl, tgt, dt, out.wantStt, combat.chaff);
     pl.lockTgt = pl.radar.stt ? tgt : null;
     updateIrst(pl, tgt, dt);
-    const aiEyes = tgt && tgt.alive && pl.pos.distanceTo(tgt.pos) < visRange() && pl.T.hmd;
+    const aiEyes = tgt && tgt.alive && canSee(pl, tgt) && pl.T.hmd;
     updateIrLock(pl, tgt, dt, pl.weapon === 'srm' ? firstOf(pl.stores, 'srm') : null, pl.radar.stt || pl.irst.fresh || aiEyes);
     handleWeapons(e, out, tgt, dt, false);
   }
@@ -1446,6 +1474,7 @@ function step(dt, now) {
   if (G.mission && G.mission.sv && G.mine && G.mission.sv.wave > (G.waveSeen || 0)) { G.waveSeen = G.mission.sv.wave; if (G.waveSeen > 1) profile.wave(G.waveSeen - 1); }
 
   // ---- training lesson ----
+  if (G.lesson && G.phase === 'fight' && me && P) lessonDriver(dt, me);
   if (G.lesson && G.phase === 'fight' && me && P) {
     if (G.lesson.update(dt, lessonContext(me, enemyMsl[me.side]))) {
       audio.beep(1560, 0.12, 0.12); setTimeout(() => audio.beep(2080, 0.16, 0.12), 120);
@@ -1490,6 +1519,46 @@ function step(dt, now) {
 
 const DEAD = { alive: false, hp: 0 };
 
+// Scripted launches for the missile-defence lessons: place the red aggressor relative to the
+// student, give its radar a few seconds to lock, fire (a salvo 2.5 s apart), then wait until
+// every missile is gone before setting up the next shot.
+const _lq = new THREE.Matrix4(), _lup = new THREE.Vector3(0, 1, 0);
+function lessonDriver(dt, me) {
+  const L = G.lesson, S = L.step, F = S && S.fire, P = me.plane;
+  const agE = G.ents.find((e) => e.side !== me.side && e.ai);
+  if (!agE) return;
+  const A = agE.plane;
+  A.lessonTgt = F && P.alive ? P : null;
+  if (!F || !P.alive || !A.alive) return;
+  const live = combat.missiles.some((m) => m.owner === A && !m.lost && !m.decoy);
+  L.fireT -= dt;
+  if (L.fs === 'wait') {
+    if (live) { L.fireT = Math.max(L.fireT, 2.5); return; }
+    if (L.fireT > 0) return;
+    // set up the shot (the instructor patches up and restocks the student between shots)
+    if (P.hp < 100) { repair(P); feed('Instructor: damage repaired.', '#9dffb8'); }
+    P.chaff = Math.max(P.chaff, P.T.chaff); P.flares = Math.max(P.flares, P.T.flares);
+    const hf = Math.hypot(P.fwd.x, P.fwd.z) || 1, s = F.from === 'behind' ? -1 : 1;
+    const pos = new THREE.Vector3(P.pos.x + (P.fwd.x / hf) * F.range * s, 0, P.pos.z + (P.fwd.z / hf) * F.range * s);
+    pos.y = Math.max(P.pos.y + (F.dAlt || 0), groundHeight(pos.x, pos.z) + 600);
+    const q = new THREE.Quaternion().setFromRotationMatrix(_lq.lookAt(pos, P.pos, _lup));
+    A.reset(pos, q, 230, agE.loadout); A.contacts = new Map(); A.lessonTgt = P;
+    if (agE.ai) agE.ai.reset();
+    L.fs = 'aim'; L.fireT = F.aim ?? 5; L.left = F.salvo || 1;
+    radio(agE, F.from === 'behind' ? 'Tally, sliding in at your six.' : `Contact, ${Math.round(F.range / 1000)} km, hot.`);
+  } else if (L.fs === 'aim') {
+    if (L.fireT > 0) return;
+    L.fs = 'fire'; L.fireT = 0;
+  }
+  if (L.fs === 'fire' && L.fireT <= 0) {
+    combat.launchMissile(A, P, F.key, 0);
+    audio.launch(A.pos);
+    radio(agE, WEAPONS[F.key].guidance === 'ir' ? 'Fox 2!' : 'Fox 3!');
+    L.left--; L.fireT = 2.5;
+    if (L.left <= 0) { L.fs = 'wait'; L.fireT = 4; }
+  }
+}
+
 // What a training lesson's steps look at.
 function lessonContext(me, msl) {
   const P = me.plane, tgt = P.tgt;
@@ -1501,7 +1570,7 @@ function lessonContext(me, msl) {
     weapon: P.weapon, agCls: agW ? agW.cls : null, agLocked: !!P.agLocked, locked: !!P.locked, stt: !!P.radar.stt,
     tgtDist: tgt && tgt.alive ? tgt.pos.distanceTo(P.pos) : 1e9, markDist: mk ? Math.hypot(P.pos.x - mk.x, P.pos.z - mk.z) : 1e9,
     landed: P.landed ? P.landed.phase : null, kills: me.kills, gk: me.groundKills || 0, units: G.units, stats: G.stats,
-    threats: msl.filter((m) => m.target === P && m.phase !== 'none').length, padlock: !!G.padlock,
+    threats: msl.filter((m) => m.target === P && m.phase !== 'none').length, padlock: !!G.padlock, chaff: P.chaff, flares: P.flares,
   };
 }
 function drawHud(dt) {
@@ -1597,6 +1666,7 @@ function drawHud(dt) {
     threat: T, threats: T.list, threatDist: T.nearest, dlz: G.dlz, myMrm,
     agl, pullUp, bounds: P.outOfBounds > 0 ? 10 - P.outOfBounds : 0, hint,
     ...strikeHud(P, me, fpmPoint),
+    coach: (settings.coach !== false || G.scn.mode === 'training') && me ? missileCoach(P, combat.enemyMissiles(me.side)) : null,
   }, dt);
 }
 
@@ -1613,6 +1683,78 @@ function missionHud(me) {
     out.race = { time: fmtTime(st.done ? st.final : st.t + st.pen), next: st.next, gates: G.race.gates.length, lap: st.lap, laps: G.scn.laps, pen: st.pen, high: st.high, ceiling: G.scn.ceiling, done: st.done, gate: g ? g.pos : null, dist: g ? g.pos.distanceTo(P.pos) : 0, best: G.bestTime || null };
   }
   return out;
+}
+
+// Missile defence coach: for the most urgent missile guiding on you, what kind it is, where it is,
+// and live feedback on the defence that works against it (drag, notch, chaff, flares, terrain).
+const _cr = new THREE.Vector3(), _cl = new THREE.Vector3();
+function missileCoach(P, msl) {
+  let best = null, bt = 1e9;
+  for (const m of msl) {
+    if (m.target !== P || !m.pos || (m.phase === 'none' && !(m.remote && m.guidance === 'ir'))) continue;
+    _cr.subVectors(P.pos, m.pos); const d = _cr.length();
+    const vc = -(_cl.subVectors(P.vel, m.vel).dot(_cr) / Math.max(d, 1));
+    const tti = d / Math.max(vc, m.burning ? 450 : 60);   // a fresh launch has not sped up yet
+    if (tti < bt) { bt = tti; best = { m, d, vc, tti }; }
+  }
+  if (!best) return null;
+  const { m, d, tti } = best, src = m.src || m;
+  const g = m.guidance || (src.w && src.w.guidance) || 'radar';
+  const name = src.w ? src.w.name : m.key ? WEAPONS[m.key].name : 'Missile';
+  const active = m.phase === 'active';
+  // which radar has to lose you: the missile's own seeker once it is active, otherwise the launcher's
+  const launcher = m.owner && m.owner.alive ? m.owner : null;
+  const useMissile = g === 'ir' || active || !launcher;
+  const sensor = useMissile ? m.pos : launcher.sensorPos ? launcher.sensorPos(new THREE.Vector3()) : launcher.pos;
+  const notchVr = useMissile ? 28 : (launcher.radarT && launcher.radarT.notchVr) || 28;
+  const vr = radialSpeed(sensor, P), below = P.pos.y < sensor.y - 60;
+  const notched = g !== 'ir' && below && Math.abs(vr) < notchVr;
+  // where the missile is, clock-code style
+  _cr.subVectors(m.pos, P.pos);
+  const hf = Math.hypot(P.fwd.x, P.fwd.z) || 1, fx = P.fwd.x / hf, fz = P.fwd.z / hf;
+  const ang = Math.atan2(_cr.x * -fz + _cr.z * fx, _cr.x * fx + _cr.z * fz);
+  const clock = ((Math.round((ang * 180) / Math.PI / 30) % 12) + 12) % 12 || 12;
+  const el = _cr.y / Math.max(d, 1), level = el > 0.25 ? 'high' : el < -0.25 ? 'low' : 'level';
+  // aspect: 0° = flying straight away from it (cold), 90° = beaming, 180° = flying into it (hot)
+  _cl.subVectors(P.pos, sensor).setY(0).normalize();
+  const vh = _cr.set(P.vel.x, 0, P.vel.z).normalize();
+  const aspect = (Math.acos(Math.max(-1, Math.min(1, vh.dot(_cl)))) * 180) / Math.PI;
+  const beam = [Math.atan2(-_cl.z, -_cl.x), Math.atan2(_cl.z, _cl.x)].map((a) => (((a * 180) / Math.PI) + 360) % 360);
+  // a local missile tells us whether its seeker has lost you
+  const coasting = active && src.mem != null && src.mem < 1.49;
+  let title, tip;
+  const beaten = !m.burning && best.vc < -5 && d > 3000;
+  if (beaten) {
+    title = `${name} FALLING BEHIND`;
+    tip = 'Its motor has burnt out and it is losing ground: it cannot catch you. Keep running until it drops out of the sky.';
+  } else if (g === 'ir') {
+    title = `HEAT-SEEKER — ${name}`;
+    tip = d < 3500 ? 'FLARES NOW (C), out of afterburner, break hard across its path.' : 'Throttle back out of afterburner, put it on your wing, and get ready to flare and break.';
+  } else if (g === 'sarh') {
+    title = `SEMI-ACTIVE — ${name}`;
+    tip = notched ? 'In the launcher\u2019s notch: hold it until the missile goes dumb.' : 'It rides the launcher\u2019s radar: beam the LAUNCHER and stay below it, drop chaff, or hide behind terrain.';
+  } else if (d < 2500) {
+    title = `LAST DITCH — ${name}`;
+    tip = 'Chaff (Z) now and break hard across its path!';
+  } else if (active) {
+    title = coasting ? `${name} LOST YOU` : `PITBULL — ${name} active`;
+    tip = coasting ? (notched ? 'Its seeker has lost you in the notch. HOLD THE BEAM a few more seconds until it gives up.' : 'Its seeker lost you: turn away and change altitude before it finds you again.') : notched ? 'IN THE NOTCH — hold the beam and pop chaff (Z).' : 'NOTCH IT: put the missile at your 3 or 9 o\u2019clock (BEAM marker) and stay below it, then chaff.';
+  } else if (m.phase === 'inertial') {
+    title = `${name} — flying blind`;
+    tip = 'No datalink: it flies to where you were. Turn hard and change altitude so it goes active on empty sky.';
+  } else if (tti > 22 || d > 22000) {
+    title = `DRAG — ${name} far out`;
+    tip = 'Turn cold (missile at your 6), full afterburner and dive: make it run out of energy. Or notch the launcher to cut its datalink.';
+  } else {
+    title = `DATALINK — ${name}`;
+    tip = notched ? 'In the launcher\u2019s notch: its datalink has lost you. Hold it.' : d < 14000 ? 'Beam now (BEAM marker) and get below it: that breaks the launcher\u2019s lock and sets up the notch for when the missile goes active.' : 'The launcher is guiding it: beam the LAUNCHER and stay below it to break the lock, or turn cold and drag.';
+  }
+  return {
+    title, tip, notched, coasting: coasting || beaten, ir: g === 'ir',
+    line: `${(d / 1000).toFixed(1)} km · ${Math.max(0, tti).toFixed(0)} s · ${clock} o'clock ${level} · aspect ${Math.round(aspect)}° ${aspect < 50 ? '(cold)' : aspect > 130 ? '(HOT)' : '(beam)'}`,
+    notch: g === 'ir' ? null : { vr: Math.round(Math.abs(vr)), need: notchVr, below, of: useMissile ? 'missile' : 'launcher' },
+    beam: g === 'ir' ? null : beam,
+  };
 }
 
 // HUD data for ground attack, aircraft systems and carrier recovery.
@@ -1989,6 +2131,7 @@ function readMenu() {
   settings.name = ($('callsign').value || 'Viper').replace(/[^\w \-]/g, '').slice(0, 16) || 'Viper';
   settings.invert = $('invert').checked;
   settings.sound = $('sound').checked;
+  settings.coach = $('coach').checked;
   settings.loadout = $('loadout').value;
   settings.scenario = $('scenarioSel').value;
   saveSettings();
@@ -2076,6 +2219,7 @@ function initMenu() {
   $('callsign').value = settings.name;
   $('invert').checked = settings.invert;
   $('sound').checked = settings.sound;
+  $('coach').checked = settings.coach !== false;
   buildHangar();
   fillScenarioSelect($('scenarioSel'), findScenario(settings.scenario) ? settings.scenario : PRESETS[0].id);
   settings.scenario = $('scenarioSel').value;
@@ -2144,7 +2288,7 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView,
+window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach,
   // advance the game n frames of 1/60 s (for testing when the tab is in the background)
   get acc() { return acc; },
   tick(n = 60) { G.noRender = true; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },

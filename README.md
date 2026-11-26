@@ -2,7 +2,7 @@
 
 Browser-based 3D **modern air combat**, from 1v1 duels to 8v8 battles, played entirely on the keyboard. There are **13 fighters from four nations**: the USA, Russia, China and Europe. Each has its own flight performance, radar, IRST, stealth, jamming, gun and missiles. The flight model is semi-realistic fly-by-wire, terrain blocks sensors, and shot-down jets break up with the pilot ejecting. It has four maps with time of day and weather, a mission builder, online rooms for up to 8 players, and AI that fills any empty seat.
 
-There's more than air-to-air. You can strike ground targets with bombs, rockets, Mavericks and HARMs against each nation's SAM and AAA sites. You can land on carriers to rearm. The game also has survival waves, time trials, seven training lessons, replays with a kill cam and an after-action map, and a pilot profile with medals and your own nose art.
+There's more than air-to-air. You can strike ground targets with bombs, rockets, Mavericks and HARMs against each nation's SAM and AAA sites. You can land on carriers to rearm. The game also has survival waves, time trials, nine training lessons, replays with a kill cam and an after-action map, and a pilot profile with medals and your own nose art.
 
 ## Aircraft
 
@@ -39,7 +39,8 @@ Then use **Quick 1v1 match** (pairs the next two people searching), or **Host a 
 - **Strike missions:** *Iron Hand* (SEAD against a Russian SAM network, with Flankers scrambling when you cross the coast) and *Convoy hunt* (stop two moving convoys before they reach the rally point).
 - **Survival:** *Defend the carrier*. Endless, growing waves of fighters and anti-ship strikers attack your carrier group. Land on the deck to rearm and repair, and relaunch from the catapult.
 - **Time trials:** *Canyon run* (28 gates down the desert canyons under a 250 m ceiling) and *Mountain slalom* (two laps round the island peaks). Your best times are saved.
-- **Training:** seven guided lessons with step-by-step prompts: flight basics, gunnery, air-to-air missiles (including a helmet-cued off-boresight shot), missile defence against a live SAM, bombing, SEAD and carrier landing.
+- **Training:** nine guided lessons with step-by-step prompts: flight basics, gunnery, air-to-air missiles (including a helmet-cued off-boresight shot), missile defence against a live SAM, bombing, SEAD, carrier landing, and two air-to-air missile defence lessons. In those, a scripted aggressor fires on cue: R-77s from long and short range (drag, notch, chaff in the notch, cutting the datalink, a salvo), then R-73s from behind and head-on (afterburner, flares, the break turn).
+- **Missile defence coach:** when a missile is guiding on you, a HUD box names it and shows its range, time to impact, clock position and your aspect. It says which radar you have to beat (the launcher's before pitbull, the missile's own after), shows live notch status (your closing speed against the limit, and whether you're below it), and gives the best defence for the moment. BEAM markers on the heading tape show where to turn. It's on by default (toggle it in the main menu) and always on in training.
 
 Missions open with a **briefing** (text, objectives and a map of the known threats). It's also on the pause menu. After a match, the **debrief** shows everyone's score, your accuracy, any medals earned, and an **after-action map**: every track, missile shot and kill, which you can scrub or play back. **Watch 3D replay** plays the whole round from any jet's view or a free camera. **Kill cam** replays each kill from behind the shooter.
 
@@ -93,6 +94,9 @@ The other tabs build missions. Everything with a position can be placed and drag
 | B | Speedbrake on / off |
 | M, then 1-7 | Radio your wingmen: attack my target, cover me, rejoin, attack ground targets, return to base (rearm on the carrier), hold fire, weapons free |
 | G (hold) | Look back |
+| Mouse drag | Free look; let go to snap back |
+| U (hold) | Look at your nearest wingman (tap again within 2 s for the next) |
+| , · . · / (hold) | Snap view left · right · up (also numpad 4 · 6 · 8) |
 | V | Chase / cockpit view |
 | P | Free camera when spectating or watching a replay (WASD, R/F up/down, drag the mouse to look, wheel for speed) |
 | Esc · H | Pause · help |
@@ -111,7 +115,8 @@ In a replay: Space pauses, Q / E skip 10 s, R / F change speed, N follows the ne
   - **IR missiles** (AIM-9M/9X, R-73/R-74M, PL-10, IRIS-T, MICA IR): proportional navigation with real motor burn and drag. Off-boresight lock needs a helmet sight, a radar lock or an IRST cue. Each has its own flare rejection.
   - **Active radar missiles** (AIM-120C/D, R-77/R-77-1/R-77M, PL-12, PL-15, MICA EM, Meteor): boost-sustain motors, loft, datalink while the shooter holds a lock, and an active seeker near the target. The Meteor's ramjet thrust depends on air density and speed.
   - **Semi-active R-27ER:** needs the shooter's radar lock all the way to impact.
-  - **Radar:** each jet has its own radar range, gimbal, lock time, ECCM, LPI and notch width. Detection range scales with the target's RCS to the fourth-root power, so stealth jets are seen far later. Enemy jamming shortens it further.
+  - **Radar:** each jet has its own radar range, gimbal, lock time, ECCM, LPI and notch width. Detection range scales with the target's RCS to the fourth-root power, so stealth jets are seen far later. Enemy jamming shortens it further. RCS depends on aspect: stealth jets are tiny nose-on and much bigger side-on or from the tail (an F-22 is seen about 5 km nose-on by an Su-35, but about 9.5 km side-on). Opening the weapon bays to fire raises it for 1.6 s. Low-band early-warning radars see stealth jets much farther but can't guide missiles.
+  - **Eyes:** visual spotting range depends on the target's size and the angle you see it from (bigger in planform during a turn), and is longer when it's in afterburner. There's a blind spot behind and below. Haze and night shorten it.
   - **IRST:** passive heat detection, aspect- and afterburner-dependent, giving bearing only. It can cue IR missiles without setting off the target's RWR.
   - **Terrain masking:** radar, IRST, seekers, eyes, RWR and MAWS all need a clear line of sight over the terrain.
   - **RWR:** shows search and lock from the opponent's radar, datalink launch, and active missiles. LPI radars are heard at shorter range.

@@ -61,7 +61,7 @@ export const JETS = {
     code: 4, country: 'usa', name: 'F-22A Raptor', nick: 'Raptor', rwr: 'F22', stealth: true,
     desc: 'Stealth air-dominance fighter. Enemy radars see it at about a tenth of their normal range, and its LPI radar barely registers on their warning receivers. Supercruise, thrust vectoring, internal weapons. No helmet sight.',
     flight: J({ mass: 23600, S: 117, thrMil: 232000, thrAB: 312000, cd0: 0.014, wave: 0.016, gMax: 10, rollMax: 3.6, aFbw: 0.7, aStall: 0.45, tvc: 0.7 }),
-    rcs: 0.0005, radar: 'apg77', irst: 0, irSig: 0.7, maws: true, hmd: false, ecm: 0.15,
+    rcs: 0.0002, rcsSide: 10, rcsRear: 6, radar: 'apg77', irst: 0, irSig: 0.7, maws: true, hmd: false, ecm: 0.15,
     gun: 'm61', ammo: 480, flares: 24, chaff: 24, size: 1.25,
     stations: [[1.95, -0.6, -2.0, 'bay'], [-1.95, -0.6, -2.0, 'bay'], [0.35, -0.85, -0.6, 'bay'], [-0.35, -0.85, -0.6, 'bay'], [0.7, -0.85, 0.9, 'bay'], [-0.7, -0.85, 0.9, 'bay'], [0.35, -0.85, 2.4, 'bay'], [-0.35, -0.85, 2.4, 'bay']],
     loadouts: {
@@ -98,7 +98,7 @@ export const JETS = {
     code: 7, country: 'rus', name: 'Su-57', nick: 'Felon', rwr: '57', stealth: true,
     desc: 'Russia\'s fifth-generation fighter: reduced radar signature (far less than the F-22 or J-20), thrust vectoring, side-looking radar arrays, IRST and missile warning. Internal R-77M and R-74M.',
     flight: J({ mass: 22750, S: 118, thrMil: 176000, thrAB: 294000, cd0: 0.015, wave: 0.018, gMax: 10, rollMax: 3.8, aStall: 0.48, aFbw: 0.75, tvc: 1.0 }),
-    rcs: 0.3, radar: 'n036', irst: 32000, irSig: 0.85, maws: true, hmd: true, ecm: 0.3,
+    rcs: 0.3, rcsSide: 6, rcsRear: 5, radar: 'n036', irst: 32000, irSig: 0.85, maws: true, hmd: true, ecm: 0.3,
     gun: 'gsh301', ammo: 150, flares: 48, chaff: 48, size: 1.3,
     stations: [[2.15, -0.35, -2.6, 'bay'], [-2.15, -0.35, -2.6, 'bay'], [0.5, -0.9, 0.0, 'bay'], [-0.5, -0.9, 0.0, 'bay'], [0.5, -0.9, 2.6, 'bay'], [-0.5, -0.9, 2.6, 'bay']],
     loadouts: {
@@ -135,7 +135,7 @@ export const JETS = {
     code: 10, country: 'chn', name: 'J-20A', nick: 'Mighty Dragon', rwr: 'J20', stealth: true,
     desc: 'Long stealth canard delta built for long-range interception: low frontal radar signature, AESA radar, chin EOTS and internal PL-15s. No internal gun at all.',
     flight: J({ mass: 26250, S: 110, thrMil: 176000, thrAB: 284000, cd0: 0.014, wave: 0.017, k: 0.15, clA: 4.4, aStall: 0.5, aFbw: 0.5, gMax: 10, rollMax: 3.3 }),
-    rcs: 0.02, radar: 't1475', irst: 30000, irSig: 0.9, maws: true, hmd: true, ecm: 0.2,
+    rcs: 0.02, rcsSide: 12, rcsRear: 8, radar: 't1475', irst: 30000, irSig: 0.9, maws: true, hmd: true, ecm: 0.2,
     gun: 'none', ammo: 0, flares: 32, chaff: 32, size: 1.35,
     stations: [[1.65, -0.5, -3.0, 'bay'], [-1.65, -0.5, -3.0, 'bay'], [0.38, -0.85, -1.0, 'bay'], [-0.38, -0.85, -1.0, 'bay'], [0.38, -0.85, 1.6, 'bay'], [-0.38, -0.85, 1.6, 'bay']],
     loadouts: {

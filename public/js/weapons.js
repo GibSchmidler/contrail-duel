@@ -202,6 +202,7 @@ export class Combat {
       if (R && R.contact) { m.est.copy(R.pos); m.estVel.copy(R.vel); }
       else { m.est.copy(plane.pos).addScaledVector(plane.fwd, 15000); m.estVel.set(0, 0, 0); } // "maddog": seeker searches straight ahead
     }
+    if (mount[3] === 'bay') plane.bayUntil = performance.now() + 1600;   // bay doors open: the RCS spikes briefly
     m.prev.copy(m.pos);
     this.missiles.push(m);
     return m;
@@ -238,6 +239,8 @@ export class Combat {
         const key = WEAPON_BY_CODE[code] || 'aim9x';
         m = { id, key, src, guidance: WEAPONS[key].guidance, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), mesh: this.getMesh(key), t: 0, remote: true, snapPos: new THREE.Vector3(), snapT: now };
         this.remoteMissiles.set(id, m);
+        const o = resolve ? resolve(src) : null;
+        if (o && o.T && o.T.stealth) o.bayUntil = performance.now() + 1600;
       }
       m.snapPos.set(x, y, z); m.vel.set(vx, vy, vz); m.snapT = now;
       m.burning = !!(flags & 1);
@@ -363,7 +366,7 @@ export class Combat {
   seekerSees(m, tgt, w) {
     _tmp2.copy(tgt.pos).sub(m.pos);
     const d = _tmp2.length();
-    if (d > detectRange(w.seeker, tgt, w.ccm)) return false;   // a stealthy target shrinks the seeker's reach
+    if (d > detectRange(w.seeker, tgt, w.ccm, m.pos)) return false;   // a stealthy target shrinks the seeker's reach
     const sp = Math.max(m.vel.length(), 1);
     if (_tmp2.dot(m.vel) / (d * sp) < Math.cos(w.gimbal)) return false;
     if (inNotch(m.pos, tgt)) return false;

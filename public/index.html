@@ -34,6 +34,7 @@
           <label>Callsign <input id="callsign" maxlength="16" autocomplete="off"></label>
           <label class="check"><input type="checkbox" id="invert"> W pulls the nose up (unchecked = flight-stick style, S pulls up)</label>
           <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
+          <label class="check"><input type="checkbox" id="coach" checked> Missile defence coach (tips on the HUD when a missile is guiding on you)</label>
           <button id="btnProfile">Pilot profile, medals &amp; nose art</button>
           <button id="btnMenuHelp" class="ghost">Controls &amp; tips</button>
 
@@ -185,6 +186,9 @@
           <tr><td><kbd>C</kbd> · <kbd>Z</kbd></td><td>Flares (vs IR) · Chaff (vs radar)</td></tr>
           <tr><td><kbd>T</kbd></td><td>Padlock view (with a helmet sight, cues the IR seeker)</td></tr>
           <tr><td><kbd>G</kbd> (hold)</td><td>Look back</td></tr>
+          <tr><td>Mouse drag</td><td>Look around freely; let go to snap back</td></tr>
+          <tr><td><kbd>U</kbd> (hold)</td><td>Look at your nearest wingman (tap again within 2 s for the next one)</td></tr>
+          <tr><td><kbd>,</kbd> · <kbd>.</kbd> · <kbd>/</kbd> (hold)</td><td>Snap view left · right · up (also numpad 4 · 6 · 8)</td></tr>
           <tr><td><kbd>V</kbd></td><td>Chase / cockpit view</td></tr>
           <tr><td><kbd>3</kbd> · <kbd>X</kbd></td><td>Air-to-ground weapons (press again to cycle) · release (hold for rockets)</td></tr>
           <tr><td><kbd>J</kbd> · <kbd>K</kbd></td><td>Gear · flaps</td></tr>
@@ -207,13 +211,16 @@
           <h3>Sensors and stealth</h3>
           <p><b>Radar</b> (the fan at the bottom) range depends on the radar and on the target's <b>radar cross-section</b>. Stealth jets are seen at a small fraction of normal range: an F-22 at about a tenth, a J-20 a little more, and the Su-57 about three-quarters. <b>Jamming</b> shortens enemy radar range further. <kbd>Tab</kbd> locks (STT), which gives radar missiles datalink updates but sets off the bandit's <b>RWR</b>. LPI radars (F-22, F-35-class AESAs) are hard for RWRs to hear.</p>
           <p><b>IRST</b> (Russian, Chinese and European jets, plus the Super Hornet) passively sees engine heat. It shows an amber circle with a bearing but no range, and it can cue IR missiles without warning the target. <b>Terrain masks everything</b>: a ridge between you blocks radar, IRST, missile seekers and your eyes. Hide behind mountains.</p>
+          <p><b>Stealth is about aspect.</b> A stealth jet is smallest seen nose-on; from the side or tail it reflects several times more, and opening the weapon bays to fire lights it up for a moment. An F-22 nose-on is seen at roughly a tenth of normal range (about 5 km by an Su-35), but side-on at nearly twice that. Low-band <b>early-warning radars</b> see stealth jets much farther, though too coarsely to guide a missile. <b>Eyes</b> don't care about stealth: you can spot a jet visually at 5-9 km depending on its size and angle, but not in your blind spot behind and below.</p>
           <p>Radars filter out ground clutter, so a jet below you that is <b>beaming</b> (flying across your line of sight) drops into the <b>notch</b>. <b>Missile warning</b> (MAWS) sees a burning motor within about 5 km and is fitted to the European, Chinese, Su-57 and F-22 jets. Without it, a silent missile only shows once its seeker goes active.</p>
           <h3>Missiles</h3>
           <p><b>Fox 2 (IR):</b> AIM-9, R-73/74, PL-10, IRIS-T, MICA IR. Press <kbd>1</kbd> and hold the bandit in the seeker circle until the tone goes steady. Modern ones can lock far off the nose using a helmet sight (<kbd>T</kbd>), a radar lock or the IRST.</p>
           <p><b>Fox 3 (active radar):</b> AIM-120, R-77, PL-12/15, MICA EM, Meteor. Press <kbd>2</kbd>; it needs a radar track. It's datalinked while you hold a lock, then goes active ("pitbull") near the target. The <b>Meteor</b> is ramjet-powered, so it keeps thrusting the whole way and is very hard to outrun. <b>Fox 1 (R-27ER):</b> semi-active, so you must keep your radar lock until impact (the HUD shows ILL), or it goes dumb.</p>
           <p>The scale right of the altitude is the launch zone: <b>IN RNG</b> means it can hit a target holding course; <b>SHOOT</b> means no escape.</p>
           <h3>Defending</h3>
-          <p><b>Against IR:</b> put the missile on your wing, pop flares (<kbd>C</kbd>), get out of afterburner. <b>Against radar:</b> beam it, go low into the notch, drop chaff (<kbd>Z</kbd>), or put a mountain between you. Missiles run out of energy, except the Meteor, which runs out much later.</p>
+          <p>When a missile is guiding on you, the <b>missile coach</b> (a box low on the HUD; toggle it in the main menu) says what kind it is, where it is (clock position, range, time to impact), which radar you have to beat, and the best defence right now. <b>BEAM</b> markers on the heading tape show the two headings that put the threat on your wing.</p>
+          <p><b>Long range: drag.</b> Turn cold (missile at your 6), afterburner, dive. The motor burns for only a few seconds; after that the missile coasts and slows, so a target running away makes it fly much farther. <b>Before pitbull: cut the datalink.</b> A Fox 3 is steered by the launcher's radar until it goes active. Beam the <i>launcher</i> and get below it to break the lock, and the missile flies to where you were. <b>After pitbull: notch.</b> Put the missile at your 3 or 9 o'clock and stay below it, so your closing speed on its seeker drops under ~30 m/s and the Doppler filter loses you. Then chaff (<kbd>Z</kbd>): it barely works unless you are beaming. Don't turn too early, or the missile just corrects. <b>Fox 1:</b> notch the launcher, which has to keep you locked. <b>Last ditch (under 2-3 km):</b> chaff and break hard across its path.</p>
+          <p><b>Against IR:</b> you can't notch a heat-seeker. Get out of afterburner, pop flares (<kbd>C</kbd>) as it launches, and break hard across its path. Flares work best early and side-on. Or put a mountain between you. Practise both with <b>Training 8 and 9</b>.</p>
           <h3>Getting shot down</h3>
           <p>A missile hit usually tears the jet apart; gunfire tends to leave it burning and spinning in. Most of the time the pilot ejects. Watch for the chute.</p>
         </div>

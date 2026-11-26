@@ -80,12 +80,39 @@ export const LESSONS = {
   },
 };
 
+// Air-to-air missile defence: a scripted aggressor (the lesson's red drone) is placed relative to
+// you and fires on cue. fire: { key, range (m), from: 'front'|'behind', dAlt (m above you), salvo }.
+const R77 = (range, o = {}) => ({ key: 'r77', range, from: 'front', dAlt: 1500, ...o });
+const R73 = (range, o = {}) => ({ key: 'r73', range, from: 'behind', dAlt: 0, aim: 4, ...o });
+const def = (n) => (c) => c.defeated >= n;
+Object.assign(LESSONS, {
+  aadef: {
+    name: 'Beating radar missiles',
+    steps: [
+      { text: 'An Su-35 about 34 km ahead is about to fire a long-range R-77 at you. DRAG it: turn until the missile is at your 6 o’clock, full afterburner (R) and dive. Make it run out of energy.', hint: 'The coach box low on the HUD says what the missile is doing. A long shot burns its motor in seconds, then coasts and slows: a target running away makes it fly much farther.', fire: R77(34000), done: def(1) },
+      { text: 'Now from 15 km: too close to outrun. When the coach says PITBULL, NOTCH: turn to a BEAM marker on the heading tape so the missile is at your 3 or 9 o’clock, and stay below it.', hint: 'The NOTCH line turns green when your closing speed on the missile is low enough and you are below it. Hold the beam until the missile goes dumb. Turning too early lets it correct.', fire: R77(15000), done: def(2) },
+      { text: 'Again, and this time pop chaff (Z) two or three times once you are in the notch.', hint: 'Chaff barely works unless you are beaming: a Doppler radar ignores chaff that is not moving like you. In the notch it is very effective.', fire: R77(14000), done: (c) => c.defeated >= 3 && c.chaffUsed >= 2 },
+      { text: 'Cut the datalink. Before it goes active, the R-77 is steered by the Su-35’s radar. Beam the LAUNCHER (BEAM markers) and get below it: when its lock breaks, the missile flies to where you were.', hint: 'Watch the coach: "flying blind" means the datalink is cut. Then turn and change altitude so the missile goes active on empty sky.', fire: R77(30000), done: def(4) },
+      { text: 'Final exam: two R-77s from 24 km. Drag first, then notch and chaff as they go active.', hint: 'Each missile is a separate problem; the coach shows whichever will reach you first.', fire: R77(24000, { salvo: 2 }), done: def(6) },
+    ],
+  },
+  irdef: {
+    name: 'Beating heat-seekers',
+    steps: [
+      { text: 'A MiG-29 is sliding in about 3 km behind you with R-73 heat-seekers. Throttle back out of afterburner, and the moment it launches pop flares (C) and break hard across the missile’s path.', hint: 'Hold G to look behind, or drag the mouse to look around. The afterburner plume is a beacon for an IR seeker, and you cannot notch a heat-seeker.', fire: R73(2800), done: def(1) },
+      { text: 'Two more. Time the flares to the launch, a few at a time, and turn hard so it has to overshoot.', hint: 'Flares work best early, before the seeker settles on you, and when it sees you side-on.', fire: R73(2600), done: def(3) },
+      { text: 'Head-on: it is coming at you from 6 km ahead. Flares, then turn hard to put it on your beam so it has to pull lead.', fire: R73(6000, { from: 'front' }), done: def(4) },
+    ],
+  },
+});
+
 export class Lesson {
   constructor(key) {
     this.key = key; this.L = LESSONS[key];
     this.i = 0; this.t = 0; this.acc = 0; this.total = 0;
     this.defeated = 0; this.prevThreats = 0; this.hitT = 0; this.prevHp = 100;
     this.doneFlash = 0; this.finished = false;
+    this.fs = 'wait'; this.fireT = 3; this.left = 0; this.firedI = -1;   // scripted launches
   }
   hold(cond, secs) { this.acc = cond ? this.acc + this.dt : 0; return this.acc >= secs; }
   get step() { return this.L.steps[this.i] || null; }
@@ -100,10 +127,12 @@ export class Lesson {
     if (c.threats < this.prevThreats && this.hitT <= 0 && c.alive) this.defeated += this.prevThreats - c.threats;
     this.prevThreats = c.alive ? c.threats : 0;
     c.defeated = this.defeated;
+    if (this.prevChaff != null && c.chaff < this.prevChaff) this.chaffUsed = (this.chaffUsed || 0) + this.prevChaff - c.chaff;
+    this.prevChaff = c.chaff; c.chaffUsed = this.chaffUsed || 0;
     const S = this.step;
     if (!S || !c.alive) return false;
     if (S.done(c, this)) {
-      this.i++; this.t = 0; this.acc = 0; this.doneFlash = 2.2;
+      this.i++; this.t = 0; this.acc = 0; this.doneFlash = 2.2; this.fs = 'wait'; this.fireT = 3; this.chaffUsed = 0;
       if (this.i >= this.L.steps.length) this.finished = true;
       return true;
     }

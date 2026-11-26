@@ -54,6 +54,7 @@ export class Hud {
       this.ccip(S, scale);
       this.systems(S, scale);
       this.warnings(S, scale);
+      this.coach(S, scale);
       this.radioMenu(S, scale);
     }
     this.markers(S, scale);
@@ -772,6 +773,58 @@ export class Hud {
     c.font = `${Math.round(12.5 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = 'rgba(255,255,255,0.65)';
     y += 6 * sc;
     for (const t of hints) { c.fillText(t, x + pad, y); y += 17 * sc; }
+    c.shadowBlur = 3;
+  }
+
+  // missile defence coach: what is guiding on you and how to beat it, plus BEAM markers on the
+  // heading tape (fly to one to put the threat on your wing: the notch)
+  coach(S, sc) {
+    const K = S.coach;
+    if (!K) return;
+    const c = this.ctx, w = this.w, h = this.h, P = S.plane, cx = w / 2;
+    if (K.beam) {
+      const hd = ((Math.atan2(P.fwd.x, -P.fwd.z) * 180) / Math.PI + 360) % 360, hy = 56 * sc, px = 6 * sc;
+      const offs = K.beam.map((b) => ((b - hd + 540) % 360) - 180);
+      const near = offs.reduce((a, b) => (Math.abs(b) < Math.abs(a) ? b : a));
+      c.save(); c.strokeStyle = c.fillStyle = K.notched ? GREEN : AMBER; c.textAlign = 'center';
+      c.font = `bold ${Math.round(11 * sc)}px "Consolas","Menlo",monospace`;
+      for (const o of offs) {
+        if (Math.abs(o) > 33) continue;
+        const x = cx + o * px;
+        c.beginPath(); c.moveTo(x, hy + 14 * sc); c.lineTo(x - 7 * sc, hy + 26 * sc); c.lineTo(x + 7 * sc, hy + 26 * sc); c.closePath(); c.fill();
+        c.fillText('BEAM', x, hy + 36 * sc);
+      }
+      if (Math.abs(near) > 33) {
+        const s = Math.sign(near), x = cx + s * 196 * sc;
+        c.beginPath(); c.moveTo(x + s * 12 * sc, hy); c.lineTo(x, hy - 9 * sc); c.lineTo(x, hy + 9 * sc); c.closePath(); c.fill();
+        c.textAlign = s > 0 ? 'left' : 'right';
+        c.fillText(`BEAM ${Math.round(Math.abs(near))}°`, x + s * 18 * sc, hy);
+      }
+      c.restore();
+    }
+    const pad = 10 * sc, bw = Math.min(540 * sc, Math.max(w * 0.56, Math.min(w - 40, 420))), x = cx - bw / 2;
+    c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+    const tips = this.wrap(K.tip, bw - pad * 2);
+    const rows = 2 + tips.length + (K.notch ? 1 : 0);
+    const bh = pad * 2 + rows * 18 * sc, y0 = h * 0.7;
+    c.shadowBlur = 0;
+    c.fillStyle = 'rgba(0,0,0,0.5)'; c.fillRect(x, y0, bw, bh);
+    const col = K.notched || K.coasting ? GREEN : K.title.startsWith('LAST') ? RED : AMBER;
+    c.strokeStyle = col; c.strokeRect(x, y0, bw, bh);
+    c.textAlign = 'left';
+    let y = y0 + pad + 8 * sc;
+    c.font = `bold ${Math.round(14 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = col;
+    c.fillText(K.title, x + pad, y); y += 18 * sc;
+    c.font = `${Math.round(12.5 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = 'rgba(255,255,255,0.8)';
+    c.fillText(K.line, x + pad, y); y += 18 * sc;
+    if (K.notch) {
+      const n = K.notch, ok = n.vr < n.need;
+      c.fillStyle = ok && n.below ? GREEN : 'rgba(255,255,255,0.8)';
+      c.fillText(`NOTCH vs ${n.of}: closing ${n.vr} m/s ${ok ? '✔' : '✘'} (need < ${n.need}) · ${n.below ? 'below it ✔' : 'ABOVE IT ✘ — dive'}`, x + pad, y);
+      y += 18 * sc;
+    }
+    c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff';
+    for (const t of tips) { c.fillText(t, x + pad, y); y += 18 * sc; }
     c.shadowBlur = 3;
   }
 

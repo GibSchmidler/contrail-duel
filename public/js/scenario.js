@@ -237,6 +237,10 @@ export const PRESETS = [
       { units: [{ key: 'buk', side: 1, x: -1000, z: -16000 }, { key: 'ewr', side: 1, x: 6000, z: -10000 }], markers: [{ x: -1000, z: -16000, label: 'SA-11', icon: 'danger' }] }, side('Blue', 0, 30000, [slot('human', 'f16c', 'pilot', 'sead')], { alt: 5000, spd: 240, hdg: 0 })],
     ['carrier', 'Training 7: carrier landing', 'Gear, flaps, approach speed and the glideslope: trap on the deck, rearm and launch from the catapult.',
       { units: [{ key: 'cvn', side: 0, x: -16000, z: 2000, hdg: 0, name: 'CVN Resolute' }], markers: [{ x: -16000, z: 2000, label: 'CARRIER', icon: 'home' }] }, side('Blue', -16000, 8500, [slot('human', 'fa18e', 'pilot', 'air')], { alt: 450, spd: 115, hdg: 0 })],
+    ['aadef', 'Training 8: beating radar missiles', 'An aggressor fires R-77s at you from long and short range: drag, notch, chaff and cutting the datalink. The coach on the HUD shows what each missile is doing.',
+      {}, side('Blue', 0, 20000, [slot('human', 'f16c', 'pilot', 'air')], { alt: 5000, spd: 250, hdg: 0 }), side('Red', 0, -18000, [A('su35s', 'drone')], { alt: 6500, spd: 230 })],
+    ['irdef', 'Training 9: beating heat-seekers', 'Short-range R-73 shots from behind and head-on: afterburner, flares and the break turn.',
+      {}, side('Blue', 0, 20000, [slot('human', 'f16c', 'pilot', 'air')], { alt: 4000, spd: 230, hdg: 0 }), side('Red', 0, 10000, [A('mig29s', 'drone')], { alt: 4000, spd: 220 })],
   ].map(([lesson, name, desc, extra, blue, red]) => scn('train-' + lesson, name, desc, { rounds: 1, weather: 'clear', extra: { mode: 'training', lesson, rules: { win: 'elim', respawn: 1, respawnT: 3 }, briefing: desc, ...extra } }, blue, red || side('Red', 0, -24000, []))),
 ];
 

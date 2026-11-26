@@ -8,6 +8,7 @@ import { WEAPONS, firstOf, countOf, flyout, launchZone, agKinds } from './arsena
 import { impactPoint } from './strike.js';
 import { groundHeight, lineOfSight, ARENA_RADIUS, visRange } from './world.js';
 import { aiDefault } from './scenario.js';
+import { canSee } from './sensors.js';
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const L = (a, b, t) => a + (b - a) * clamp(t, 0, 1);
@@ -114,6 +115,7 @@ export class AIPilot {
     const P = this.plane, A = this.A, vis = visRange();
     const cmd = this.command;
     if (cmd && cmd.type === 'attack' && cmd.tgt && cmd.tgt.alive && enemies.includes(cmd.tgt)) { this.target = cmd.tgt; return cmd.tgt; }
+    if (P.lessonTgt && P.lessonTgt.alive) { this.target = P.lessonTgt; return P.lessonTgt; }
     const score = (e) => {
       const c = picture && picture.get(e);
       if (!c) return 1e12;
@@ -475,6 +477,11 @@ export class AIPilot {
       steer(P, _d, 0.8, o); o.throttle = 1.1; return o;
     }
     // ---------- target drone: lazy circuit ----------
+    if (A.drone && P.lessonTgt && P.lessonTgt.alive) {
+      // a training aggressor: points at its student and keeps it locked; the lesson fires for it
+      _d.copy(P.lessonTgt.pos).sub(P.pos).normalize();
+      steer(P, _d, 0.7, o); o.throttle = 0.7; o.weapon = 'mrm'; o.wantStt = true; this.mode = 'drone'; return o;
+    }
     if (A.drone) {
       const a = this.time * 0.08, c = ctx.base || _u.set(0, 0, 0);
       _d.set(c.x * 0.3 + Math.cos(a) * 6000 - P.pos.x, 0, c.z * 0.3 + Math.sin(a) * 6000 - P.pos.z).normalize();
@@ -485,7 +492,7 @@ export class AIPilot {
 
     // ---------- what it knows: its radar track, IRST, eyes or datalink, like a human ----------
     const trueDist = hasTgt ? target.pos.distanceTo(P.pos) : 1e9;
-    const eyes = hasTgt && trueDist < visRange() && lineOfSight(P.pos, target.pos);
+    const eyes = hasTgt && canSee(P, target);
     const irst = P.irst && P.irst.contact;
     const pc = hasTgt && ctx.picture && ctx.picture.get(target);
     const known = hasTgt && ((P.radar.contact && !P.radarSilent) || eyes || irst || (pc && pc.mem > 0));

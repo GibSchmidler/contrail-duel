@@ -20,7 +20,7 @@ export const MEDALS = [
   { id: 'wall', ic: '▦', name: 'Iron wall', desc: 'Reach wave 10 in a survival mission.' },
   { id: 'racer', ic: '⏱', name: 'Speed demon', desc: 'Finish a time trial.' },
   { id: 'student', ic: '✎', name: 'Student pilot', desc: 'Complete a training lesson.' },
-  { id: 'graduate', ic: '🎓', name: 'Graduate', desc: 'Complete all seven training lessons.' },
+  { id: 'graduate', ic: '🎓', name: 'Graduate', desc: 'Complete all nine training lessons.' },
   { id: 'victory', ic: '⚔', name: 'Mission accomplished', desc: 'Win a mission or match.' },
   { id: 'untouch', ic: '◇', name: 'Untouchable', desc: 'Win a mission with at least one kill without taking a single hit.' },
   { id: 'phoenix', ic: '♨', name: 'Phoenix', desc: 'Get shot down, respawn, and score a kill in the same mission.' },
@@ -28,7 +28,7 @@ export const MEDALS = [
   { id: 'veteran', ic: '✧', name: 'Veteran', desc: 'Fly 25 sorties.' },
 ];
 const BY_ID = Object.fromEntries(MEDALS.map((m) => [m.id, m]));
-const LESSON_COUNT = 7;
+const LESSON_COUNT = 9;
 
 function blank() {
   return { v: 1, sorties: 0, wins: 0, losses: 0, draws: 0, airKills: 0, groundKills: 0, gunKills: 0, deaths: 0, shots: 0, hits: 0, rounds: 0, gunHits: 0,
