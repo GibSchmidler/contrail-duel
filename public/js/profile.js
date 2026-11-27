@@ -31,7 +31,7 @@ const BY_ID = Object.fromEntries(MEDALS.map((m) => [m.id, m]));
 const LESSON_COUNT = 9;
 
 function blank() {
-  return { v: 1, sorties: 0, wins: 0, losses: 0, draws: 0, airKills: 0, groundKills: 0, gunKills: 0, deaths: 0, shots: 0, hits: 0, rounds: 0, gunHits: 0,
+  return { v: 1, sorties: 0, wins: 0, losses: 0, draws: 0, airKills: 0, groundKills: 0, gunKills: 0, deaths: 0, assists: 0, damage: 0, mostDamage: 0, shots: 0, hits: 0, rounds: 0, gunHits: 0,
     agShots: 0, agHits: 0, traps: 0, perfectTraps: 0, flight: 0, bestWave: 0, mostKills: 0, races: {}, lessons: {}, medals: {} };
 }
 
@@ -50,7 +50,7 @@ export class Profile {
     if (this.onMedal) this.onMedal(BY_ID[id]);
   }
   // ---- events from the game ----
-  missionStart() { this.m = { kills: 0, gk: 0, hit: false, died: false, shots0: 0, hits0: 0 }; this.fresh = []; this.d.sorties++; if (this.d.sorties >= 25) this.award('veteran'); this.save(); }
+  missionStart() { this.m = { kills: 0, gk: 0, hit: false, died: false, shots0: 0, hits0: 0, dmg: 0 }; this.fresh = []; this.d.sorties++; if (this.d.sorties >= 25) this.award('veteran'); this.save(); }
   kill(cause) {
     const d = this.d, m = this.m || (this.m = { kills: 0, gk: 0 });
     d.airKills++; m.kills++;
@@ -73,6 +73,9 @@ export class Profile {
     this.save();
   }
   hit() { if (this.m) this.m.hit = true; }
+  assist() { this.d.assists = (this.d.assists || 0) + 1; this.save(); }
+  // called for every hit, so it saves at the end of the match rather than each time
+  damage(amt) { this.d.damage = (this.d.damage || 0) + amt; if (this.m) { this.m.dmg = (this.m.dmg || 0) + amt; this.d.mostDamage = Math.max(this.d.mostDamage || 0, this.m.dmg); } }
   died() { this.d.deaths++; if (this.m) this.m.died = true; this.save(); }
   trap(wire) { this.d.traps++; this.award('trap'); if (wire === 3) { this.d.perfectTraps++; this.award('ok3'); } this.save(); }
   lesson(key) { this.d.lessons[key] = true; this.award('student'); if (Object.keys(this.d.lessons).length >= LESSON_COUNT) this.award('graduate'); this.save(); }
@@ -117,7 +120,10 @@ export function renderProfile(root, P, settings, hooks) {
           <div><span>${d.sorties}</span>sorties</div>
           <div><span>${d.wins}–${d.losses}${d.draws ? '–' + d.draws : ''}</span>won–lost</div>
           <div><span>${d.airKills}</span>air kills (${d.gunKills} guns)</div>
+          <div><span>${d.assists || 0}</span>assists</div>
           <div><span>${d.groundKills}</span>ground kills</div>
+          <div><span>${Math.round(d.damage || 0)}</span>damage dealt (best ${Math.round(d.mostDamage || 0)})</div>
+          <div><span>${d.mostKills || 0}</span>most kills in a match</div>
           <div><span>${d.deaths}</span>times shot down</div>
           <div><span>${d.deaths ? (d.airKills / d.deaths).toFixed(2) : d.airKills}</span>kill/death ratio</div>
           <div><span>${pct(d.hits, d.shots)}</span>missile hits (${d.hits}/${d.shots})</div>

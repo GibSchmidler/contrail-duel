@@ -163,6 +163,7 @@ function applyDamage(e, dmg, kind, by = -1, zone = null) {
   if (e.unit) { damageUnit(e, dmg, kind, by); return; }
   const pl = e.plane;
   if (!pl.alive) return;
+  noteDamage(e, Math.min(dmg, Math.max(0, pl.hp)), by);
   pl.hp -= dmg;
   if (zone && pl.dmg) {
     const before = pl.dmg[zone];
@@ -178,6 +179,34 @@ function applyDamage(e, dmg, kind, by = -1, zone = null) {
   }
   if (pl.hp <= 0) killPlane(e, kind);
 }
+
+// Damage credit. Each hit is applied on exactly one screen (the victim's owner), so that screen
+// credits the shooter and, online, tells everyone else in small batches.
+const dmgOut = new Map();
+function noteDamage(target, amt, by) {
+  if (!(amt > 0) || by < 0 || by === target.id) return;
+  const s = G.byId[by];
+  if (!s || s.side === target.side) return;
+  if (!target.unit) { const r = target.dmgBy || (target.dmgBy = {}); const x = r[by] || (r[by] = { d: 0, t: 0 }); x.d += amt; x.t = G.time; }
+  creditDamage(by, amt);
+  if (G.mode === 'online') dmgOut.set(by, (dmgOut.get(by) || 0) + amt);
+}
+function creditDamage(by, amt) {
+  const s = G.byId[by];
+  if (!s) return;
+  s.dmg = (s.dmg || 0) + amt;
+  if (s === G.mine) profile.damage(amt);
+}
+function flushDamage() {
+  if (!dmgOut.size || G.mode !== 'online') { dmgOut.clear(); return; }
+  net.send({ t: 'dg', r: G.round, l: [...dmgOut].map(([id, d]) => [id, Math.round(d * 10) / 10]) });
+  dmgOut.clear();
+}
+net.on('dg', (m) => {
+  if (G.mode !== 'online' || !Array.isArray(m.l)) return;
+  for (const x of m.l.slice(0, 64)) if (Array.isArray(x) && Number.isInteger(x[0]) && x[1] > 0 && x[1] < 5000) creditDamage(x[0], x[1]);
+  if (G.phase === 'matchEnd') renderEndTable();
+});
 
 // ---------------- deaths ----------------
 const wrecks = new Wrecks(scene, effects, audio, {
@@ -199,7 +228,7 @@ function shakeAt(pos, power) {
 }
 
 const WEAPON_WORD = { gun: 'guns', msl: 'missile', crash: 'crashed', bounds: 'left the area', bomb: 'bomb', rkt: 'rockets' };
-function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) {
+function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId, assists) {
   const pl = e.plane;
   if (!pl.alive) return;
   pl.hp = 0; pl.alive = false; pl.firing = false;
@@ -212,6 +241,15 @@ function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) 
   if (G.mode === 'ai' && (e === G.mine || camera.position.distanceTo(pl.pos) < 3500)) G.slowT = 2.4;
   e.deaths++;
   if (killer && killer.side !== e.side) killer.kills++;
+  // assists: everyone else on the other side who did real damage to this jet in the last minute
+  if (assists == null) assists = e.dmgBy ? Object.entries(e.dmgBy).filter(([id, x]) => +id !== killerId && x.d >= 10 && G.time - x.t < 60).map(([id]) => +id) : [];
+  e.dmgBy = null;
+  for (const id of assists) {
+    const a = G.byId[id];
+    if (!a || a.side === e.side || a === killer) continue;
+    a.assists = (a.assists || 0) + 1;
+    if (a === G.mine) { profile.assist(); feed(`Assist: ${e.name}`, '#9dffb8'); }
+  }
   // kill feed
   const vic = `${e.name} (${jetOf(pl.type).name.split(' ')[0]})`;
   if (killer && killer !== e) feed(`${killer.name} ▸ ${vic} · ${WEAPON_WORD[cause] || cause}`, SIDE_COLORS[killer.side]);
@@ -227,7 +265,7 @@ function killPlane(e, cause, seed = (Math.random() * 2147483647) | 0, killerId) 
   }
   if (e.local && G.mode === 'online') {
     const r = (v) => [v.x, v.y, v.z].map((x) => Math.round(x * 100) / 100);
-    net.send({ t: 'dead', sl: e.id, c: cause, p: r(pl.pos), v: r(pl.vel), q: [pl.quat.x, pl.quat.y, pl.quat.z, pl.quat.w], sd: seed, by: killerId });
+    net.send({ t: 'dead', sl: e.id, c: cause, p: r(pl.pos), v: r(pl.vel), q: [pl.quat.x, pl.quat.y, pl.quat.z, pl.quat.w], sd: seed, by: killerId, as: assists });
   }
   pl.landed = null;
   if (G.mission && isAuthority()) G.mission.onKill(e, killer);
@@ -257,6 +295,7 @@ hooksOut.raceFinish = (st) => { if (profile.race(G.scn.id, st.final)) { G.bestTi
 // ---------------- ground units ----------------
 function damageUnit(u, dmg, kind, by) {
   if (!u.alive || !hot()) return;
+  noteDamage(u, Math.min(dmg, Math.max(0, u.hp)), by);
   u.hp -= dmg;
   if (by >= 0) u.lastBy = by;
   if (u.hp <= 0) destroyUnit(u, by);
@@ -316,7 +355,7 @@ function respawnEnt(e) {
   pl.contacts = new Map(); pl.tgt = null; pl.lockTgt = null; pl.wantStt = false; pl.podN = {};
   const cv = G.units.find((u) => u.D.deck && u.alive && u.side === e.side);
   if (cv) { land(pl, cv, { trap: false, along: 0, across: 0 }); pl.landed.phase = 'ready'; pl.landed.along = cv.D.deck.len / 2 - 105; pl.landed.across = -cv.D.deck.wid * 0.12; deckStep(pl, 0, null, false); }
-  e.handle = null; e.respawnT = 0;
+  e.handle = null; e.respawnT = 0; e.dmgBy = null;
   if (e.ai) e.ai.reset();
   if (e === G.mine) { G.death = null; G.spectate = null; input.reset(); G.camQuat.copy(pl.quat); hud.showBanner('BACK IN THE FIGHT', cv ? `On the ${cv.name}'s catapult` : '', '#9dffb8', 2); }
 }
@@ -327,6 +366,7 @@ function sendPhase() {
   net.send({ t: 'phase', ph: G.phase, pt: G.phaseT, rw: G.rw, r: G.round, rt: G.roundT, k: G.ents.map((e) => [e.id, e.kills, e.deaths, e.groundKills || 0]), ms: G.mission ? G.mission.pack() : null });
 }
 function setPhase(ph, t = 0) {
+  flushDamage();
   G.phase = ph; G.phaseT = t;
   if (ph === 'fight') { hud.showBanner('FIGHT!', '', '#9dffb8', 1.4); audio.beep(1320, 0.45, 0.14); }
   if (ph === 'matchEnd') showEnd();
@@ -352,7 +392,7 @@ function startRound(r) {
   for (const e of G.ents) {
     e.respawnT = 0; e.racePrev = null;
     const s = sp[e.side][e.idx], pl = e.plane;
-    e.lastHit = null; e.handle = null; pl.contacts = new Map();
+    e.lastHit = null; e.dmgBy = null; e.handle = null; pl.contacts = new Map();
     if (e.local) {
       pl.setType(e.type);
       pl.reset(s.pos, s.quat, s.speed, e.loadout);
@@ -470,7 +510,7 @@ function makeEnt(r) {
   const local = r.human ? r.member === G.myId : isAuthority();
   const plane = local ? new Aircraft(r.name, r.type) : new RemotePlane(r.name);
   if (!local) { plane.setType(r.type); plane.gunAcc = 0; }
-  const e = { ...r, local, plane, ai: null, model: null, kills: 0, deaths: 0, groundKills: 0, lastHit: null, handle: null, respawnT: 0, aiIn: { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false, gear: false, flaps: 0 }, aiOut: null };
+  const e = { ...r, local, plane, ai: null, model: null, kills: 0, deaths: 0, groundKills: 0, assists: 0, dmg: 0, dmgBy: null, lastHit: null, handle: null, respawnT: 0, aiIn: { pitch: 0, roll: 0, yaw: 0, throttle: 1, airbrake: false, gear: false, flaps: 0 }, aiOut: null };
   plane.ent = e; plane.side = r.side; plane.netId = G.netId + r.id;
   if (local && !r.human) e.ai = new AIPilot(plane, r.aic || r.skill);
   return e;
@@ -667,7 +707,7 @@ net.on('dead', (m) => {
   if (m.p) pl.pos.set(m.p[0], m.p[1], m.p[2]);
   if (m.v) pl.vel.set(m.v[0], m.v[1], m.v[2]);
   if (m.q) pl.quat.set(m.q[0], m.q[1], m.q[2], m.q[3]);
-  if (pl.alive) killPlane(e, m.c, m.sd, m.by); // same seed: every screen sees the same break-up
+  if (pl.alive) killPlane(e, m.c, m.sd, m.by, Array.isArray(m.as) ? m.as.filter(Number.isInteger).slice(0, 16) : []); // same seed: every screen sees the same break-up
 });
 net.on('fl', (m) => {
   const e = G.byId[m.sl];
@@ -1549,6 +1589,8 @@ function step(dt, now) {
       }
       if (l.length) net.send({ t: 'S', r: G.round, l });
     }
+    G.dmgSendT = (G.dmgSendT || 0) - dt;
+    if (G.dmgSendT <= 0) { G.dmgSendT = 1; flushDamage(); }
     G.unitSendT -= dt;
     if (G.unitSendT <= 0 && G.role === 'host' && G.units.length) {
       G.unitSendT = 0.2;
@@ -2157,11 +2199,10 @@ function showEnd() {
   if (mySide == null) { t.textContent = win < 0 ? 'DRAW' : `${sd[win].name.toUpperCase()} WINS`; t.className = ''; }
   else { t.textContent = win === mySide ? 'VICTORY' : win < 0 ? 'DRAW' : 'DEFEAT'; t.className = win === mySide ? 'win' : 'lose'; }
   $('endScore').textContent = `${sd[0].name} ${G.rw[0]} – ${G.rw[1]} ${sd[1].name}`;
-  const rows = G.ents.slice().sort((a, b) => b.kills - a.kills || a.deaths - b.deaths).map((e) =>
-    `<tr style="color:${SIDE_COLORS[e.side]}"><td>${esc(e.name)}${e === G.mine ? ' (you)' : ''}</td><td>${esc(jetOf(e.type).name)}</td><td>${e.kills}</td><td>${e.groundKills || 0}</td><td>${e.deaths}</td></tr>`).join('');
-  $('endStats').innerHTML = `<table class="stats"><tr><th>Pilot</th><th>Aircraft</th><th>Kills</th><th>Ground</th><th>Deaths</th></tr>${rows}</table>`;
+  renderEndTable();
   const st = G.stats, pc = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '—');
-  $('endMine').innerHTML = G.mine && st ? `<p>Your sortie: ${G.mine.kills} air kill${G.mine.kills === 1 ? '' : 's'}, ${G.mine.groundKills || 0} ground, missiles ${st.mslHits}/${st.msl} (${pc(st.mslHits, st.msl)}), gun ${pc(st.gunHits, st.rounds)} of ${st.rounds} rounds on target${st.ag ? `, A/G ${st.agHits} hits from ${st.ag} releases` : ''}${st.traps ? `, ${st.traps} trap${st.traps > 1 ? 's' : ''}` : ''}, ${fmtTime(st.flight)} in the air.</p>` : '';
+  $('endMine').innerHTML = G.mine && st ? `<p>Your sortie: ${G.mine.kills} air kill${G.mine.kills === 1 ? '' : 's'}, ${G.mine.assists || 0} assist${G.mine.assists === 1 ? '' : 's'}, ${G.mine.groundKills || 0} ground, ${Math.round(G.mine.dmg || 0)} damage dealt, missiles ${st.mslHits}/${st.msl} (${pc(st.mslHits, st.msl)}), gun ${pc(st.gunHits, st.rounds)} of ${st.rounds} rounds on target${st.ag ? `, A/G ${st.agHits} hits from ${st.ag} releases` : ''}${st.traps ? `, ${st.traps} trap${st.traps > 1 ? 's' : ''}` : ''}, ${fmtTime(st.flight)} in the air.</p>` : '';
+  $('endCareer').innerHTML = G.mine ? careerSummary(profile.d) : '';
   const fresh = profile.fresh.map((id) => MEDAL_BY_ID[id]).filter(Boolean);
   $('endMedals').innerHTML = fresh.length ? `<h2>Medals earned</h2><div class="medals">${fresh.map((m) => `<div class="medal on"><span class="ic">${m.ic}</span><b>${esc(m.name)}</b>${esc(m.desc)}</div>`).join('')}</div>` : '';
   setupAar();
@@ -2170,6 +2211,25 @@ function showEnd() {
   $('btnRematch').style.display = G.mode === 'online' && G.role !== 'host' ? 'none' : '';
   $('btnEndMenu').textContent = G.mode === 'online' ? 'Leave room' : 'Main menu';
   showScreen('end');
+}
+
+// Damage is in hit points: a fighter has 100, so 100 damage is one jet's worth. Ground units count too.
+function renderEndTable() {
+  const rows = G.ents.slice().sort((a, b) => b.kills - a.kills || (b.assists || 0) - (a.assists || 0) || (b.dmg || 0) - (a.dmg || 0) || a.deaths - b.deaths).map((e) =>
+    `<tr style="color:${SIDE_COLORS[e.side]}"><td>${esc(e.name)}${e === G.mine ? ' (you)' : ''}</td><td>${esc(jetOf(e.type).name)}</td><td>${e.kills}</td><td>${e.assists || 0}</td><td>${e.groundKills || 0}</td><td>${Math.round(e.dmg || 0)}</td><td>${e.deaths}</td></tr>`).join('');
+  $('endStats').innerHTML = `<table class="stats"><tr><th>Pilot</th><th>Aircraft</th><th>Kills</th><th>Assists</th><th>Ground</th><th title="Hit points of damage done to the enemy. A fighter has 100.">Damage</th><th>Deaths</th></tr>${rows}</table>`;
+}
+function careerSummary(d) {
+  const pc = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '—');
+  const h = d.flight / 3600;
+  const cell = (v, l) => `<div><span>${v}</span>${l}</div>`;
+  return `<h2>Career</h2><div class="pstats compact">${[
+    cell(d.sorties, 'sorties'), cell(`${d.wins}–${d.losses}${d.draws ? '–' + d.draws : ''}`, 'won–lost'),
+    cell(d.airKills, 'air kills'), cell(d.assists || 0, 'assists'), cell(d.groundKills, 'ground kills'),
+    cell(Math.round(d.damage || 0), 'damage dealt'), cell(d.deaths, 'times shot down'),
+    cell(d.deaths ? (d.airKills / d.deaths).toFixed(2) : d.airKills, 'kill/death'),
+    cell(pc(d.hits, d.shots), 'missile hits'), cell(h < 1 ? Math.round(d.flight / 60) + ' min' : h.toFixed(1) + ' h', 'flight time'),
+  ].join('')}</div><p class="dim small">Saved in this browser. Full career and medals: Pilot profile on the main menu.</p>`;
 }
 
 // ---- lobby (online room) ----

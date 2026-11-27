@@ -176,6 +176,9 @@ label.aistat .av { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
 .medal .ic { font-size: 20px; float: right; }
 .pstats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 14px; font-size: 13px; margin: 8px 0 14px; }
 .pstats div span { display: block; font-size: 19px; color: var(--accent); }
+.pstats.compact { grid-template-columns: repeat(5, 1fr); gap: 4px 10px; font-size: 11px; margin: 4px 0 6px; }
+.pstats.compact div span { font-size: 15px; }
+@media (max-width: 700px) { .pstats.compact { grid-template-columns: repeat(3, 1fr); } }
 .artgrid { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .artgrid button { width: auto; margin: 0; padding: 4px; background: rgba(0,0,0,0.25); }
 .artgrid button.on { outline: 2px solid var(--accent); }
