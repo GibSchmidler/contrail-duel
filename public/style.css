@@ -244,3 +244,33 @@ body.touch canvas#game { touch-action: none; }
 #touch.dead.fc .tstick { display: block !important; }
 .touchonly { display: none; }
 body.touch .touchonly { display: block; }
+
+/* ---------- campaign ---------- */
+.cmphead h1 { margin-bottom: 0; letter-spacing: 0.12em; }
+.cmpgrid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 22px; margin-top: 10px; }
+.cmpstory p { line-height: 1.55; }
+.cmpstory h3 { margin: 14px 0 6px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.cmpact { color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; }
+.cmplist, .cmpsq { list-style: none; padding: 0; margin: 4px 0 14px; font-size: 13px; }
+.cmplist li button, .cmplist li > span { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 6px 8px; margin: 2px 0; background: none; border: 1px solid transparent; }
+.cmplist li.on button { border-color: var(--accent); }
+.cmplist li.locked { opacity: 0.4; }
+.cmplist em { font-style: normal; color: var(--dim); width: 14px; }
+.cmplist .grade, .cmplist .nextm { margin-left: auto; }
+.nextm { font-size: 10px; color: var(--accent); letter-spacing: 0.1em; }
+.cmpsq li { padding: 3px 0; }
+.cmpsq .st-kia b, .cmpsq .st-wounded b { text-decoration: line-through; opacity: 0.6; }
+.cmpchoices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.cmpopt { text-align: left; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.cmpopt b { font-size: 16px; color: var(--accent); }
+.cmpopt span { font-size: 13px; line-height: 1.45; opacity: 0.85; }
+.card.locked { opacity: 0.35; cursor: default; }
+.grade { display: inline-block; min-width: 1.4em; text-align: center; font-weight: 700; border-radius: 4px; padding: 0 4px; }
+.grade.big { font-size: 30px; padding: 0 10px; vertical-align: middle; }
+.gS { color: #1a1200; background: #ffd23f; } .gA { color: #062012; background: #7be3a0; } .gB { color: #071a2c; background: #7fb8ff; } .gC { color: #222; background: #c8c8c8; }
+.cmpend { margin-bottom: 10px; }
+.cmpend table.grades { max-width: 360px; }
+.cmpend table.grades td:last-child { text-align: right; }
+p.warn, .warn { color: #ffb07a; }
+@media (max-width: 760px) { .cmpgrid, .cmpchoices { grid-template-columns: 1fr; } }
+.cmpstory > h2 { font-size: 24px; letter-spacing: 2px; color: #fff; text-transform: none; margin: 4px 0 12px; }

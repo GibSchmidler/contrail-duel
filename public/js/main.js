@@ -13,6 +13,7 @@ import { Mission, Race, defaultLabel } from './mission.js';
 import { Lesson, LESSONS } from './training.js';
 import { Recorder, drawAar, drawBrief } from './recorder.js';
 import { Profile, renderProfile, MEDAL_BY_ID } from './profile.js';
+import { Campaign, renderCampaign, missionById } from './campaign.js';
 import { sanitizeArt } from './noseart.js';
 import { JETS, COUNTRIES, JETS_OF, jetOf, DEFAULT_JET } from './aircraft.js';
 import { Wrecks } from './wreck.js';
@@ -444,7 +445,7 @@ function buildRoster(scn, seats, choices, names) {
       // time trials: only the human racers fly
       if (scn.mode === 'race' && !human) return;
       const loadout = pickLoadout(type, q.loadout, human && ch.jet === type ? ch.loadout : null);
-      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member, human, route: q.route || null, art: human ? (choices[member] || {}).art || null : null });
+      roster.push({ id, side: k, idx: i, name: human ? names[member] || 'Pilot' : q.name || `${sd.name} ${i + 1}`, type, loadout, skill: q.skill, aic: aiConfig(q), member, human, route: q.route || null, art: human ? (choices[member] || {}).art || null : null });
     });
   });
   return roster;
@@ -541,6 +542,7 @@ function startMatch(scn, roster, mode) {
   gateView.build(G.scn); markerView.build(G.scn); G.markPos = null;
   G.spawnSeq = 300;
   G.mine = G.ents.find((e) => e.human && e.member === G.myId) || null;
+  G.campaign = mode === 'ai' ? G.pendingCampaign || null : null; G.pendingCampaign = null;
   G.rw = [0, 0]; G.round = 0; G.feed = []; G.paused = false; G.profiled = false;
   if (G.mine) profile.missionStart();
   enterGame();
@@ -581,9 +583,10 @@ function enterGame() {
 
 function quitToMenu(reason) {
   if (G.mode === 'online') net.send({ t: 'leave' });
+  const wasCampaign = !!G.campaign;
   teardownMatch();
-  G.mode = null; G.phase = 'menu'; G.paused = false; G.room = null; G.lobby = null;
-  showScreen('menu');
+  G.mode = null; G.phase = 'menu'; G.paused = false; G.room = null; G.lobby = null; G.campaign = null;
+  if (wasCampaign) openCampaign(); else showScreen('menu');
   if (reason) toast(reason);
 }
 
@@ -1301,7 +1304,9 @@ function step(dt, now) {
       G.mission.update(dt);
       const alive = [0, 1].map((k) => G.sides[k].filter((e) => e.plane.alive || e.respawnT > 0).length);
       const timeUp = G.scn.timeLimit > 0 && G.roundT >= G.scn.timeLimit * 60;
-      const res = G.race ? raceResult(timeUp) : G.scn.mode === 'training' ? (G.lesson && G.lesson.finished && G.lesson.doneFlash <= 0.2 ? { win: 0, why: 'Lesson complete', lesson: true } : null) : G.mission.check(alive, timeUp);
+      let res = G.race ? raceResult(timeUp) : G.scn.mode === 'training' ? (G.lesson && G.lesson.finished && G.lesson.doneFlash <= 0.2 ? { win: 0, why: 'Lesson complete', lesson: true } : null) : G.mission.check(alive, timeUp);
+      // campaign: losing your own jet ends the mission (after a moment of the death camera)
+      if (G.campaign && G.mine && !G.mine.plane.alive && !G.scn.rules.respawn && G.death && G.death.t > 4 && !(res && res.win === 0)) res = { win: 1, why: 'You were shot down' };
       if (res) {
         const win = res.win;
         if (win >= 0) G.rw[win]++;
@@ -2207,9 +2212,11 @@ function showEnd() {
   $('endMedals').innerHTML = fresh.length ? `<h2>Medals earned</h2><div class="medals">${fresh.map((m) => `<div class="medal on"><span class="ic">${m.ic}</span><b>${esc(m.name)}</b>${esc(m.desc)}</div>`).join('')}</div>` : '';
   setupAar();
   $('endStatus').textContent = G.mode === 'online' && G.role !== 'host' ? 'Waiting for the host…' : '';
-  $('btnRematch').textContent = G.mode === 'online' ? 'Back to room' : 'Fly again';
+  $('endCampaign').innerHTML = G.campaign ? campaignDebrief(win === 0) : '';
+  $('endCampaign').style.display = G.campaign ? '' : 'none';
+  $('btnRematch').textContent = G.campaign ? (G.campaign.passed ? 'Continue campaign' : 'Retry mission') : G.mode === 'online' ? 'Back to room' : 'Fly again';
   $('btnRematch').style.display = G.mode === 'online' && G.role !== 'host' ? 'none' : '';
-  $('btnEndMenu').textContent = G.mode === 'online' ? 'Leave room' : 'Main menu';
+  $('btnEndMenu').textContent = G.mode === 'online' ? 'Leave room' : G.campaign ? 'Campaign screen' : 'Main menu';
   showScreen('end');
 }
 
@@ -2230,6 +2237,48 @@ function careerSummary(d) {
     cell(d.deaths ? (d.airKills / d.deaths).toFixed(2) : d.airKills, 'kill/death'),
     cell(pc(d.hits, d.shots), 'missile hits'), cell(h < 1 ? Math.round(d.flight / 60) + ' min' : h.toFixed(1) + ' h', 'flight time'),
   ].join('')}</div><p class="dim small">Saved in this browser. Full career and medals: Pilot profile on the main menu.</p>`;
+}
+
+// ---- campaign ----
+const campaign = new Campaign();
+function openCampaign(sel) {
+  showScreen('campaign');
+  renderCampaign($('campaignPanel'), campaign, {
+    callsign: settings.name,
+    menu: () => showScreen('menu'),
+    loadoutsOf: (jet) => JETS[jet].loadoutKeys.map((k) => [k, `${JETS[jet].loadouts[k].name} — ${loadoutText(JETS[jet].loadouts[k])}`]),
+    defaultLoadout: (jet, role) => pickLoadout(jet, role, null),
+    fly: (mid, jet, loadout, replay) => {
+      const { scn, wing } = campaign.build(mid, jet, loadout, settings.name);
+      const s = sanitize(scn);
+      G.pendingCampaign = { mid, jet, loadout, replay, wing };
+      showBriefing(s, () => startPractice(s, true));
+    },
+  }, sel);
+}
+function campaignDebrief(won) {
+  const c = G.campaign, m = missionById(c.mid), me = G.mine;
+  if (!c.result) {
+    const obj = G.mission ? G.mission.obj.filter((o) => o.side === 0 && o.optional) : [];
+    const optDone = obj.filter((o) => (o.kind === 'defend' ? o.state !== 'failed' : o.state === 'done')).length;
+    const wing = c.wing.map((w) => {
+      const e = G.ents.find((x) => x.side === 0 && !x.human && x.name === w.name);
+      const h = e && e.handle;
+      return { key: w.key, kills: e ? e.kills : 0, lost: !!e && e.deaths > 0, ejected: !!h && (h.ejected || h.ejectAt >= 0) };
+    });
+    const r = { won, replay: c.replay, optDone, optTotal: obj.length, hp: me && me.plane.alive ? me.plane.hp : 0, time: G.roundT, kills: me ? me.kills : 0, wing };
+    c.result = campaign.finish(c.mid, r);
+    c.passed = won;
+  }
+  const R = c.result, g = R.grade;
+  if (!won) {
+    return `<h2>Mission failed</h2><p>${esc((G.lastResult && G.lastResult.why) || 'The mission was not completed.')}</p><p class="dim small">The story continues only when the mission is complete. Retry it, or go back to the campaign screen to change your aircraft or loadout.</p>`;
+  }
+  const paras = (t) => t.split(/\n\s*\n/).filter(Boolean).map((p) => `<p>${esc(p)}</p>`).join('');
+  return `<h2>Mission grade <b class="grade big g${g.letter}">${g.letter}</b></h2>
+    <table class="stats grades">${g.parts.map(([l, v]) => `<tr><td>${esc(l)}</td><td>${v > 0 ? '+' : ''}${v}</td></tr>`).join('')}<tr><td><b>Total</b></td><td><b>${g.pts}</b></td></tr></table>
+    ${R.news.map((n) => `<p class="warn">${esc(n)}</p>`).join('')}
+    ${c.replay ? '<p class="dim small">Replay: your best grade is kept; the squadron is unchanged.</p>' : paras(m.debrief || '')}`;
 }
 
 // ---- lobby (online room) ----
@@ -2424,6 +2473,12 @@ function initMenu() {
   $('btnHelpClose').onclick = () => $('help').classList.remove('show');
   $('btnMenuHelp').onclick = () => $('help').classList.add('show');
   $('btnRematch').onclick = () => {
+    if (G.campaign) {
+      const c = G.campaign;
+      if (c.passed) { quitToMenu(); return; }
+      G.pendingCampaign = { ...c, result: null, passed: false };
+      startPractice(G.lastPractice, true); return;
+    }
     if (G.mode === 'ai') { startPractice(G.lastPractice || PRESETS[0], true); return; }
     if (G.role === 'host') hostBackToLobby();
   };
@@ -2451,7 +2506,8 @@ function initMenu() {
   $('rpExit').onclick = () => stopReplay();
   $('btnProfile').onclick = () => { readMenu(); showProfile(); };
   $('brFly').onclick = () => briefingGo();
-  $('brBack').onclick = () => { if (G.mode) { if (G.paused) togglePause(); quitToMenu(); } else showScreen('menu'); };
+  $('brBack').onclick = () => { if (G.mode) { if (G.paused) togglePause(); quitToMenu(); } else if (G.pendingCampaign) { G.pendingCampaign = null; openCampaign(); } else showScreen('menu'); };
+  $('btnCampaign').onclick = () => { audio.start(); readMenu(); openCampaign(); };
   window.addEventListener('keydown', (e) => { if (e.key === 'Enter' && $('briefing').classList.contains('show')) briefingGo(); });
   for (const el of document.querySelectorAll('#menu input, #menu select')) el.addEventListener('change', readMenu);
   $('loadout').addEventListener('change', () => { readMenu(); sendChoice(); });

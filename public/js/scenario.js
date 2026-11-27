@@ -273,6 +273,7 @@ export function sanitize(raw) {
     loadout: typeof (q && q.loadout) === 'string' ? q.loadout.slice(0, 16) : '',
     ...(q && q.ai && typeof q.ai === 'object' ? { ai: aiConfig({ skill: pick(q.skill, SKILL_LABELS, 'pilot'), ai: q.ai }) } : {}),
     ...(q && Array.isArray(q.route) && q.route.length ? { route: pts(q.route, 12, true) } : {}),
+    ...(q && typeof q.name === 'string' && q.name.trim() ? { name: str(q.name.trim(), 16, '') } : {}),
   });
   out.waves = (Array.isArray(r.waves) ? r.waves : []).slice(0, MAX_WAVES).map((w, i) => ({
     id: Math.round(clamp(w && w.id, 0, 999, i + 1)), name: str(w && w.name, 24, `Wave ${i + 1}`), side: side01(w && w.side),

@@ -44,6 +44,16 @@ Then use **Quick 1v1 match** (pairs the next two people searching), or **Host a 
 
 Missions open with a **briefing** (text, objectives and a map of the known threats). It's also on the pause menu. After a match, the **debrief** shows everyone's kills, **assists**, ground kills, **damage** and deaths, your accuracy, your **career totals**, any medals earned, and an **after-action map**: every track, missile shot and kill, which you can scrub or play back. **Watch 3D replay** plays the whole match, every round, from any jet's view, riding along with any missile, or from a free camera. **Kill cam** replays each kill from behind the shooter, and **Missile cam** rides the missile that scored it from launch to impact, looking at its target.
 
+## Campaign: Fault Lines
+
+**Campaign: Fault Lines** on the main menu is an eight-mission single-player story of a near-future war, flown with Lance Squadron, a NATO composite squadron. A Russian move in the Arctic opens the war; it spreads to a Russian expeditionary base in the desert, a Chinese grab for a Pacific island chain, and the mountains of NATO's eastern flank, before ending where it began. Each mission opens with the story, then the usual briefing and map.
+
+- **Wingmen with names.** Cutter, Ruby and Moss fly with you, each with their own personality. A wingman who is shot down is gone for the rest of the campaign (wounded if they ejected, killed if not), and a replacement pilot takes the seat. The story and briefings name whoever is actually flying.
+- **New aircraft as you go:** you start in the F-16C and earn the F/A-18E, the F-15C and the F-22A.
+- **Two decisions** change the missions that follow and the ending: whether to cover the carrier or raid the J-16 airfield first, and whether to cover a downed pilot's rescue or press on to the final target.
+- **Grades** from S to C for each mission: optional objectives, damage taken, your kills and time all add up; losing wingmen costs points. Fly a finished mission again from the list to improve its grade; replays never change your squadron.
+- If you are shot down the mission fails, and you retry it. Progress is saved in your browser.
+
 ## Scenarios
 
 Pick a built-in mission on the main menu (duels, 2v2, 4v4 furball, Raptors vs Flankers, night intercept, canyon knife fight, 4-player co-op against 8 AI, 8v8 team battle, the strike, survival and time-trial missions, and the training lessons) or open the **Scenario builder**. The **Setup & aircraft** tab holds the basics:
