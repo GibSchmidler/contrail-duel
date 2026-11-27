@@ -1751,7 +1751,10 @@ function missileCoach(P, msl) {
   const useMissile = g === 'ir' || active || !launcher;
   const sensor = useMissile ? m.pos : launcher.sensorPos ? launcher.sensorPos(new THREE.Vector3()) : launcher.pos;
   const notchVr = useMissile ? 28 : (launcher.radarT && launcher.radarT.notchVr) || 28;
-  const vr = radialSpeed(sensor, P), below = P.pos.y < sensor.y - 60;
+  const vr = radialSpeed(sensor, P);
+  // the notch needs ground behind you: be below that radar, or so low that its beam grazes the ground
+  const agl = P.pos.y - groundHeight(P.pos.x, P.pos.z), horiz = Math.hypot(P.pos.x - sensor.x, P.pos.z - sensor.z);
+  const below = P.pos.y < sensor.y - 60 || (agl < 250 && P.pos.y - sensor.y < horiz * 0.06);
   const notched = g !== 'ir' && below && Math.abs(vr) < notchVr;
   // where the missile is, clock-code style
   _cr.subVectors(m.pos, P.pos);

@@ -1097,7 +1097,7 @@ export class Hud {
     if (K.notch) {
       const n = K.notch, ok = n.vr < n.need;
       c.fillStyle = ok && n.below ? GREEN : 'rgba(255,255,255,0.8)';
-      c.fillText(`NOTCH vs ${n.of}: closing ${n.vr} m/s ${ok ? '✔' : '✘'} (need < ${n.need}) · ${n.below ? 'below it ✔' : 'ABOVE IT ✘ — dive'}`, x + pad, y);
+      c.fillText(`NOTCH vs ${n.of}: closing ${n.vr} m/s ${ok ? '✔' : '✘'} (need < ${n.need}) · ${n.below ? 'ground behind you ✔' : 'ABOVE IT ✘ — dive below it or get low'}`, x + pad, y);
       y += 18 * sc;
     }
     c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff';

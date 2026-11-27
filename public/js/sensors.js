@@ -3,7 +3,7 @@
 // Every jet has its own radar; targets differ in radar cross-section, IR signature and jamming.
 import * as THREE from 'three';
 import { RADAR, RADARS, RWR, MAWS, WEAPONS, rcsFactor } from './arsenal.js';
-import { lineOfSight, visRange } from './world.js';
+import { lineOfSight, visRange, groundHeight } from './world.js';
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const _rel = new THREE.Vector3(), _u = new THREE.Vector3();
@@ -18,9 +18,23 @@ export function radialSpeed(sensorPos, target) {
   _rel.copy(target.pos).sub(sensorPos).normalize();
   return target.vel.dot(_rel);
 }
+// Ground clutter sits behind the target when the radar looks down at it, and also when the target
+// flies so low that the beam grazes the ground around it (even a radar at the same height or on
+// the ground then sees the earth in the same beam). Either way a beaming target vanishes.
 export function inNotch(sensorPos, target, notchVr = RADAR.notchVr) {
-  const lookDown = target.pos.y < sensorPos.y - 60;
-  return lookDown && Math.abs(radialSpeed(sensorPos, target)) < notchVr;
+  if (Math.abs(radialSpeed(sensorPos, target)) >= notchVr) return false;
+  if (target.pos.y < sensorPos.y - 60) return true;
+  const agl = target.pos.y - groundHeight(target.pos.x, target.pos.z);
+  if (agl > 250) return false;
+  const horiz = Math.hypot(target.pos.x - sensorPos.x, target.pos.z - sensorPos.z);
+  return target.pos.y - sensorPos.y < horiz * 0.06;      // within ~3.5° of grazing
+}
+// Look-down clutter: how much of a radar's range survives looking down at a target. The penalty is
+// full when the target is near the ground (it sits in the ground return) and eases as it climbs.
+export function lookDownMul(RT, target) {
+  const agl = target.pos.y - groundHeight(target.pos.x, target.pos.z);
+  const k = agl < 300 ? 1 : Math.max(0.4, 1 - ((agl - 300) / 3000) * 0.6);
+  return 1 - (1 - RT.lookDown) * k;
 }
 // Radar cross-section as seen from a sensor at `from`. Stealth shaping works best head-on: the
 // sides and the tail reflect much more (every jet is bigger from the side). Opening the weapon
@@ -91,7 +105,7 @@ export function radarSees(plane, target) {
   _rel.copy(target.pos).sub(plane.pos);
   const dist = _rel.length();
   const lookDown = target.pos.y < plane.pos.y - 60;
-  if (dist > detectRange(RT.range, target, RT.ccm, plane.pos) * (lookDown ? RT.lookDown : 1) * (1 - 0.6 * rd)) return false;
+  if (dist > detectRange(RT.range, target, RT.ccm, plane.pos) * (lookDown ? lookDownMul(RT, target) : 1) * (1 - 0.6 * rd)) return false;
   if (_rel.divideScalar(dist).dot(plane.fwd) < Math.cos(RT.gimbal)) return false;
   if (inNotch(plane.pos, target, RT.notchVr)) return false;
   return lineOfSight(plane.pos, target.pos); // radar can't see through a mountain

@@ -219,6 +219,7 @@ export function buildUnitMesh(D, country) {
 // ---------------------------------------------------------------- simulation
 const _rel = new THREE.Vector3(), _aim = new THREE.Vector3(), _sp = new THREE.Vector3(), _t = new THREE.Vector3();
 const _fo = new Map();
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 function fo(key, rho) { const k = key + ':' + Math.round(rho * 10); if (!_fo.has(k)) _fo.set(k, flyout(key, 30, rho)); return _fo.get(k); }
 // Threat ring for the tactical map: how far out this kind of site can reach a jet flying toward it
 // at medium altitude (its missile's launch range, capped by its own radar), or its gun range.
@@ -295,8 +296,10 @@ export class Unit {
     const d = p.pos.distanceTo(sp);
     const agl = p.pos.y - groundHeight(p.pos.x, p.pos.z);
     if (D.radar && this.radarMode > 0) {
-      if (d > detectRange(D.radar.range, p, 0.2, sp, !!D.ewr)) return false;
-      if (agl < (D.minAgl || 30) && d > 3000) return false;              // ground clutter hides very low flyers
+      // ground clutter: detection range shrinks the lower a jet flies, from full at 2.5× the site's
+      // low-altitude floor down to a few km near the trees (short-range systems have lower floors)
+      const floor = D.minAgl || 30, lowK = clamp01((agl - 0.5 * floor) / (2 * floor));
+      if (d > Math.max(3000, detectRange(D.radar.range, p, 0.2, sp, !!D.ewr) * (0.15 + 0.85 * lowK))) return false;
       if (inNotch(sp, p, D.radar.notchVr)) return false;
       return lineOfSight(sp, p.pos, 5);
     }

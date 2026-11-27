@@ -103,7 +103,7 @@ export function blastZone(target, pos) {
 
 // ------------------------------------------------------------------
 const _tmp = new THREE.Vector3(), _tmp2 = new THREE.Vector3(), _los = new THREE.Vector3(), _vr = new THREE.Vector3(), _om = new THREE.Vector3();
-const _acmd = new THREE.Vector3(), _mq = new THREE.Quaternion(), _fz = new THREE.Vector3(0, 0, -1), _aim = new THREE.Vector3();
+const _acmd = new THREE.Vector3(), _mq = new THREE.Quaternion(), _fz = new THREE.Vector3(0, 0, -1), _aim = new THREE.Vector3(), _mp = new THREE.Vector3();
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) * 2; // ~N(0,1)
 
@@ -509,6 +509,25 @@ export class Combat {
       if (m.lost) aimPos = null;
     }
 
+    // Multipath: against a very low target the radar energy also bounces off the surface, making a
+    // mirror image below the ground. A radar seeker coming in at a shallow angle wanders between the
+    // two in elevation and can be pulled into the ground. Strongest over smooth water; a missile
+    // diving steeply from above sees past it.
+    if (aimPos && tgt && tgt.alive && aimPos === tgt.pos && (w.guidance === 'sarh' || w.guidance === 'radar')) {
+      const gh = groundHeight(tgt.pos.x, tgt.pos.z), agl = tgt.pos.y - gh, sea = gh <= 0.5;
+      const lim = sea ? 120 : 70;
+      if (agl < lim && agl > 0) {
+        const dH = Math.max(1, Math.hypot(tgt.pos.x - m.pos.x, tgt.pos.z - m.pos.z));
+        const graze = (m.pos.y - tgt.pos.y) / dH;
+        if (graze < 0.25) {
+          const k = (1 - agl / lim) * (1 - clamp(graze, 0, 0.25) / 0.25) * (sea ? 1 : 0.7);
+          if (m.mpPh == null) m.mpPh = Math.random() * 6.28;
+          const wob = Math.sin(m.t * 2.3 + m.mpPh) * 0.5 + Math.sin(m.t * 5.1 + m.mpPh * 1.7) * 0.3 + 0.35;
+          aimPos = _mp.copy(tgt.pos); aimPos.y -= 2 * agl * k * wob;     // 2 × agl = the mirror image
+          m.multipath = k;
+        }
+      }
+    }
     if (aimPos) {
       _los.copy(aimPos).sub(m.pos);
       const dist = Math.max(_los.length(), 1);

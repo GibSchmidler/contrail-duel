@@ -143,10 +143,14 @@ export function terrainHeight(x, z) {
 export function groundHeight(x, z) { return Math.max(0, terrainHeight(x, z)); }
 
 // Terrain masking: true when the straight line from a to b clears the ground.
+// How far apart two points at these heights can be before the curve of the earth hides one from
+// the other (radar horizon, 4/3-earth refraction): 4.12 km × (√h1 + √h2), heights in metres.
+export function horizonDist(h1, h2) { return 4120 * (Math.sqrt(Math.max(2, h1)) + Math.sqrt(Math.max(2, h2))); }
 export function lineOfSight(a, b, clearance = 0) {
-  if (a.y > MAX_TERRAIN && b.y > MAX_TERRAIN) return true;
   const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
   const len = Math.hypot(dx, dy, dz);
+  if (len > horizonDist(a.y, b.y)) return false;     // below the horizon: a low jet hides from a distant radar
+  if (a.y > MAX_TERRAIN && b.y > MAX_TERRAIN) return true;
   const n = Math.ceil(len / 200);
   if (n < 2) return true;
   for (let i = 1; i < n; i++) {
