@@ -34,6 +34,7 @@ const BINDS = {
   lookRight: ['Period', 'Numpad6'],
   lookUp: ['Slash', 'Numpad8'],
   map: ['KeyO'],
+  atc: ['KeyY'],
   wpnCycle: ['TouchWpn'],
   cycle: ['KeyN'],
   pause: ['Escape'],

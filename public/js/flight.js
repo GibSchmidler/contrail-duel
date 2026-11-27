@@ -159,7 +159,12 @@ export class Aircraft {
     const flap = this.flaps;
     const gMaxD = JF.gMax * (1 - 0.35 * Math.max(D.wingL, D.wingR) - 0.2 * D.tail) * (flap > 0 ? 0.75 : 1);
     const n0 = Math.max(0, U.y);
-    const nCmd = pitchIn >= 0 ? n0 + pitchIn * (gMaxD - n0) : n0 + pitchIn * (n0 - JF.gMin);
+    // Powered-approach mode (gear and flaps down): like real fly-by-wire landing control laws, full
+    // stick asks for only about +1 / -0.7 G around the current flight path, and roll is slower, so
+    // small corrections on the glideslope stay small.
+    const pa = this.gear && flap > 0;
+    this.pa = pa;
+    const nCmd = pitchIn >= 0 ? n0 + pitchIn * ((pa ? Math.min(gMaxD, n0 + 1) : gMaxD) - n0) : n0 + pitchIn * (pa ? 0.7 : n0 - JF.gMin);
     const clA = JF.clA * (1 + 0.12 * flap), cl0 = 0.35 * flap;
     const clCmd = (nCmd * m * GRAV) / Math.max(qS, 1);
     const alphaT = clamp((clCmd - cl0) / clA, -JF.aFbw * 0.6, JF.aFbw);
@@ -207,7 +212,7 @@ export class Aircraft {
     w.addScaledVector(U, 5 * auth * (betaT - this.beta));
     const rollAuth = Math.max(clamp(qbar / 14000, 0.12, 1), JF.tvc * 0.35) * (1 - 0.45 * (1 - JF.tvc * 0.5) * clamp(this.alpha / JF.aFbw, 0, 1));
     // a shot-up wing loses lift on one side: the jet rolls toward it unless the pilot holds it
-    const pT = inp.roll * JF.rollMax * rollAuth * (1 - 0.45 * Math.max(D.wingL, D.wingR)) + (D.wingL - D.wingR) * 0.9 * clamp(qbar / 20000, 0, 1);
+    const pT = inp.roll * JF.rollMax * rollAuth * (pa ? 0.5 : 1) * (1 - 0.45 * Math.max(D.wingL, D.wingR)) + (D.wingL - D.wingR) * 0.9 * clamp(qbar / 20000, 0, 1);
     this.p += (pT - this.p) * Math.min(1, dt * 10);
     w.addScaledVector(V > 30 ? vhat : F, this.p);
     this.omega.copy(w);

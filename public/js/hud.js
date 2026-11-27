@@ -127,7 +127,7 @@ export class Hud {
     // speed box
     c.strokeRect(lx - bw, cy - bh / 2, bw, bh);
     c.textAlign = 'right'; c.font = `bold ${Math.round(18 * sc)}px "Consolas","Menlo",monospace`;
-    c.fillStyle = P.speed < 90 ? RED : GREEN;
+    c.fillStyle = P.speed < (P.pa ? 55 : 90) ? RED : GREEN;
     c.fillText(Math.round(kts).toString(), lx - 8 * sc, cy);
     c.fillStyle = GREEN; c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
     c.fillText('KTS', lx - 8 * sc, cy - 28 * sc);
@@ -522,6 +522,18 @@ export class Hud {
       c.setLineDash([]);
       c.fillStyle = c.strokeStyle; c.fillText(g.code || 'SAM', x, y);
     }
+    // the carrier's final-approach course: a dashed line out from the stern with a tick every 2 km
+    const CL = S.carrierLine;
+    if (CL) {
+      const ax = -Math.sin(CL.hdg), az = Math.cos(CL.hdg);
+      const [x0, y0] = toMap(CL.pos), [x1, y1] = toMap({ x: CL.pos.x + ax * 12000, z: CL.pos.z + az * 12000 });
+      c.strokeStyle = CL.gear ? 'rgba(127,232,255,0.75)' : 'rgba(127,232,255,0.35)';
+      c.setLineDash([5 * sc, 4 * sc]);
+      c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke();
+      c.setLineDash([]);
+      const len = Math.hypot(x1 - x0, y1 - y0) || 1, px = -(y1 - y0) / len * 3 * sc, py = (x1 - x0) / len * 3 * sc;
+      for (let i = 1; i <= 6; i++) { const t = i / 6, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t; c.beginPath(); c.moveTo(x - px, y - py); c.lineTo(x + px, y + py); c.stroke(); }
+    }
     c.restore();
     // compass: north marker and ticks every 30°
     const nA = Math.atan2(-fx, -fz);   // screen angle of world north (-z): 0 = up, clockwise
@@ -790,7 +802,7 @@ export class Hud {
       c.restore();
     }
     if (S.pullUp && blink) { c.fillStyle = RED; c.fillText('PULL UP', w / 2, y); y += 28 * sc; }
-    if (S.plane.speed < 90) { c.fillStyle = AMBER; c.fillText('SPEED', w / 2, y); y += 28 * sc; }
+    if (S.plane.speed < 90 && !(S.plane.pa && S.plane.speed > 55)) { c.fillStyle = AMBER; c.fillText('SPEED', w / 2, y); y += 28 * sc; }
     if (S.bounds > 0) { c.fillStyle = blink ? RED : AMBER; c.fillText(`RETURN TO COMBAT AREA ${Math.ceil(S.bounds)}`, w / 2, y); y += 28 * sc; }
     if (S.msg) { c.fillStyle = AMBER; c.font = `${Math.round(16 * sc)}px "Consolas","Menlo",monospace`; c.fillText(S.msg, w / 2, y); }
   }
@@ -1008,13 +1020,57 @@ export class Hud {
     c.textAlign = 'center';
     if (S.deck) { c.font = `bold ${Math.round(17 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = CYAN; c.fillText(S.deck, w / 2, h * 0.62); }
     if (S.respawn != null) { c.font = `bold ${Math.round(18 * sc)}px "Consolas","Menlo",monospace`; c.fillStyle = '#ffffff'; c.fillText(`Back in the fight in ${Math.ceil(S.respawn)} s`, w / 2, h * 0.62); }
-    if (S.carrierCue && S.plane.alive) {
-      // carrier approach: glideslope / lineup cue
-      const K = S.carrierCue;
-      c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
-      c.fillStyle = K.ok ? GREEN : AMBER;
-      c.fillText(`${K.name} ${(K.dist / 1000).toFixed(1)} km · ${K.line} · ${K.slope}${K.gear ? '' : ' · GEAR UP (J)'}`, w / 2, h * 0.66);
+    if (S.appr && S.plane.alive) this.approach(S, sc);
+  }
+
+  // Carrier approach: ICLS needles around the HUD centre, the Fresnel lens "ball", the AOA indexer,
+  // the landing signal officer's calls and a status line.
+  approach(S, sc) {
+    const c = this.ctx, w = this.w, h = this.h, A = S.appr;
+    const cx = w / 2, cy = h / 2, R = 78 * sc;
+    const cl = (v) => Math.max(-1, Math.min(1, v));
+    c.save();
+    c.lineWidth = 2 * sc; c.shadowBlur = 0;
+    // ICLS needles: they show where the glideslope and centreline are (high = glideslope bar below centre)
+    const gy = cy + cl(A.gs / 1.4) * R, lx = cx - cl(A.lu / 3) * R;
+    c.strokeStyle = Math.abs(A.gs) < 0.4 ? GREEN : AMBER;
+    c.beginPath(); c.moveTo(cx - R, gy); c.lineTo(cx + R, gy); c.stroke();
+    c.strokeStyle = Math.abs(A.lu) < 0.9 ? GREEN : AMBER;
+    c.beginPath(); c.moveTo(lx, cy - R); c.lineTo(lx, cy + R); c.stroke();
+    // AOA indexer (left): upper chevron = slow, donut = on speed, lower chevron = fast
+    const ax = cx - R - 46 * sc, s = 9 * sc;
+    const slow = A.aoa > 0.5, fast = A.aoa < -0.5, on = Math.abs(A.aoa) < 1.25;
+    c.lineWidth = 3 * sc;
+    c.strokeStyle = slow ? GREEN : 'rgba(157,255,184,0.12)';
+    c.beginPath(); c.moveTo(ax - s, cy - 3.2 * s); c.lineTo(ax, cy - 2 * s); c.lineTo(ax + s, cy - 3.2 * s); c.stroke();
+    c.strokeStyle = on ? AMBER : 'rgba(255,204,85,0.12)';
+    c.beginPath(); c.arc(ax, cy, s * 0.8, 0, Math.PI * 2); c.stroke();
+    c.strokeStyle = fast ? RED : 'rgba(255,90,74,0.12)';
+    c.beginPath(); c.moveTo(ax - s, cy + 3.2 * s); c.lineTo(ax, cy + 2 * s); c.lineTo(ax + s, cy + 3.2 * s); c.stroke();
+    c.font = `${Math.round(10 * sc)}px "Consolas","Menlo",monospace`; c.textAlign = 'center'; c.fillStyle = GREEN;
+    c.fillText('AOA', ax, cy + 4.6 * s);
+    // the ball (right), visible from about a mile out: amber ball against the green datum lights
+    if (A.rng < 1900) {
+      const bx = cx + R + 46 * sc, cell = 9 * sc;
+      c.fillStyle = 'rgba(0,0,0,0.35)'; c.fillRect(bx - cell, cy - 3 * cell, 2 * cell, 6 * cell);
+      c.fillStyle = GREEN;
+      for (const sd of [-1, 1]) for (let i = 0; i < 4; i++) c.fillRect(bx + sd * (cell * 1.6 + i * cell * 0.9), cy - 1.5 * sc, cell * 0.55, 3 * sc);
+      const by = cy - Math.max(-2.6, Math.min(2.6, (A.gs / 0.8) * 2.5)) * cell;
+      c.fillStyle = A.gs < -0.8 ? RED : '#ffb030';
+      c.beginPath(); c.arc(bx, by, cell * 0.55, 0, Math.PI * 2); c.fill();
+      c.fillStyle = GREEN; c.fillText('BALL', bx, cy + 4.6 * s);
     }
+    // the LSO
+    if (A.lso) {
+      c.font = `bold ${Math.round(18 * sc)}px "Consolas","Menlo",monospace`;
+      c.fillStyle = A.lso.bad ? RED : CYAN;
+      c.fillText(`LSO: ${A.lso.text}`, cx, cy - R - 26 * sc);
+    }
+    c.font = `${Math.round(13 * sc)}px "Consolas","Menlo",monospace`;
+    const warn = [!A.gear && 'GEAR UP (J)', A.gear && A.flaps < 1 && 'FLAPS (K)'].filter(Boolean);
+    c.fillStyle = warn.length ? AMBER : GREEN;
+    c.fillText(`${A.name} ${(Math.max(0, A.rng) / 1000).toFixed(1)} km · ${A.kt} kt · sink ${A.sink.toFixed(1)} m/s · ${A.atc ? 'AUTO-THROTTLE' : 'Y: auto-throttle'}${warn.length ? ' · ' + warn.join(' · ') : ''}`, cx, cy + R + 30 * sc);
+    c.restore();
   }
 
   wrap(text, maxW) {

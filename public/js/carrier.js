@@ -50,13 +50,15 @@ export function tryLand(pl, u) {
   const fwdAlong = pl.fwd.x * Math.sin(u.hdgR) - pl.fwd.z * Math.cos(u.hdgR);
   const bank = Math.asin(Math.max(-1, Math.min(1, pl.right.y)));
   if (!pl.gear) return { ok: false, why: 'Belly landing — the gear was up (J)' };
-  if (pl.vel.y < -8) return { ok: false, why: `Hit the deck too hard (${(-pl.vel.y).toFixed(1)} m/s sink)` };
+  // naval gear is built for about 7-8 m/s; harder than that it survives but gets bent, and past ~11 m/s it collapses
+  const sink = -pl.vel.y;
+  if (sink > 11) return { ok: false, why: `Hit the deck too hard (${sink.toFixed(1)} m/s sink): the gear collapsed` };
   if (Math.abs(bank) > 0.35) return { ok: false, why: 'Wing struck the deck' };
   if (fwdAlong < 0.9) return { ok: false, why: 'Not lined up with the deck' };
   if (pl.speed > 105) return { ok: false, why: 'Far too fast to land' };
   // wires sit across the aft part of the deck
   const wire = q.along > -D.len / 2 + 15 && q.along < -D.len / 2 + 95;
-  return { ok: true, trap: wire, along: q.along, across: q.across };
+  return { ok: true, trap: wire, along: q.along, across: q.across, hard: sink > 8 ? sink : 0 };
 }
 
 export function land(pl, u, res) {

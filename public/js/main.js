@@ -358,7 +358,7 @@ function respawnEnt(e) {
   if (cv) { land(pl, cv, { trap: false, along: 0, across: 0 }); pl.landed.phase = 'ready'; pl.landed.along = cv.D.deck.len / 2 - 105; pl.landed.across = -cv.D.deck.wid * 0.12; deckStep(pl, 0, null, false); }
   e.handle = null; e.respawnT = 0; e.dmgBy = null;
   if (e.ai) e.ai.reset();
-  if (e === G.mine) { G.death = null; G.spectate = null; input.reset(); G.camQuat.copy(pl.quat); hud.showBanner('BACK IN THE FIGHT', cv ? `On the ${cv.name}'s catapult` : '', '#9dffb8', 2); }
+  if (e === G.mine) { resetApproach(); G.death = null; G.spectate = null; input.reset(); G.camQuat.copy(pl.quat); hud.showBanner('BACK IN THE FIGHT', cv ? `On the ${cv.name}'s catapult` : '', '#9dffb8', 2); }
 }
 
 // ---------------- rounds ----------------
@@ -374,6 +374,7 @@ function setPhase(ph, t = 0) {
 }
 
 function startRound(r) {
+  resetApproach();
   G.round = r;
   combat.clear(); effects.clear(); wrecks.clear();
   G.death = null; G.slowT = 0; G.shake = 0; G.spectate = null; G.roundT = 0;
@@ -931,6 +932,115 @@ function raceResult(timeUp) {
   return { win: best.side, title: racers.length > 1 ? `${best.name.toUpperCase()} WINS` : 'COURSE COMPLETE', why: `${fmtTime(st.final)}${st.pen > 0 ? ` incl. ${st.pen.toFixed(1)} s penalty` : ''}`, times: fin.map((e) => [e.name, R.of(e).final]) };
 }
 
+// ---------------- carrier approach aids ----------------
+// What a real carrier pilot has: the Fresnel lens ("the ball") and ICLS needles for the 3.5°
+// glideslope and the centreline, an angle-of-attack indexer (fly on-speed AOA, not a speed), an
+// approach auto-throttle that holds that AOA, and the landing signal officer (LSO) talking you down
+// and grading the pass.
+const ON_SPEED = 0.1414;        // rad: on-speed AOA (8.1°, as in the F/A-18); ~120-135 kt depending on weight
+const GLIDE = 3.5;              // deg
+const AIM_WIRE = 65;            // m past the ramp: the 3-wire
+const appr = { k: [6, 4, 0.6], st: null, atc: false, atcI: 0, set: -1, touchAuto: false, lso: null, lsoT: 0, callT: 0, contact: false, waveoff: false, s: null, lostT: 0 };
+// AOA with the part caused by manoeuvring G taken out (what it would be at 1 G): the auto-throttle
+// and the LSO use this, so pitch corrections don't read as speed changes (real ATCs do the same
+// with normal-acceleration compensation).
+function aoa1g(P) {
+  const F = P.F, lift = 0.5 * 1.225 * P.speed * P.speed * F.S * F.clA * (1 + 0.12 * P.flaps);
+  return P.alpha - ((P.g - 1) * P.mass * 9.81) / Math.max(lift, 1);
+}
+function resetApproach() { Object.assign(appr, { aoaF: null, lastA: null, st: null, atc: false, set: -1, lso: null, lsoT: 0, callT: 0, contact: false, waveoff: false, s: null, lostT: 0 }); }
+function updateApproach(dt, P) {
+  appr.lsoT -= dt; appr.callT -= dt;
+  const cv = carrierOf(P.side);
+  if (!cv || P.landed) { appr.st = null; return; }
+  const q = cv.toDeck(P.pos), D = cv.D.deck;
+  const behind = -D.len / 2 + AIM_WIRE - q.along;           // m aft of the touchdown point
+  const lined = P.fwd.x * Math.sin(cv.hdgR) - P.fwd.z * Math.cos(cv.hdgR) > 0.8;
+  if (!(P.gear || Math.hypot(q.along, q.across) < 6000) || behind < -30 || behind > 14000 || !lined) {
+    appr.st = null;
+    if ((appr.lostT += dt) > 3) { appr.contact = false; appr.waveoff = false; appr.s = null; }
+    return;
+  }
+  appr.lostT = 0;
+  // glideslope error from the height error against the 3.5 deg path to the touchdown point (1.5 m = where the
+  // gear meets the deck). Like the real lens it gets more sensitive in close, and past the touchdown point
+  // it keeps telling the truth: still above the deck there means high and long.
+  const hErr = q.y - (1.5 + behind * Math.tan((GLIDE * Math.PI) / 180));
+  const gs = (Math.atan2(hErr, Math.max(35, behind)) * 180) / Math.PI;           // + high, - low
+  const lu = (Math.atan2(q.across, D.len / 2 - q.along) * 180) / Math.PI;      // + right of centreline
+  const aoa = ((P.alpha - ON_SPEED) * 180) / Math.PI;                          // + slow, - fast (indexer: raw)
+  const a1 = ((aoa1g(P) - ON_SPEED) * 180) / Math.PI;
+  appr.aoaF = appr.aoaF == null ? a1 : appr.aoaF + (a1 - appr.aoaF) * Math.min(1, dt / 1.2);   // smoothed, for the LSO
+  const sink = -P.vel.y;
+  appr.st = { gs, lu, aoa, rng: behind, sink, close: behind < 1600 };
+  if (behind > 1600) return;
+  // in close: the LSO has you
+  if (!appr.contact) { appr.contact = true; appr.s = { gs: 0, lu: 0, aoa: 0, n: 0, low: 0 }; lso('Paddles contact. Roger ball.', false, 2.2); }
+  const S = appr.s;
+  if (behind > 60) { S.gs += Math.abs(gs); S.lu += Math.abs(lu); S.aoa += Math.abs(appr.aoaF); S.n++; S.low = Math.min(S.low, gs); }
+  let call = null, bad = false;
+  if (!P.gear) { call = 'WAVE OFF! WAVE OFF! Gear!'; bad = true; }
+  else if (behind < 600 && behind > 100 && (gs < -1.1 || Math.abs(lu) > 2.5 || sink > 9)) { call = 'WAVE OFF! WAVE OFF!'; bad = true; }
+  else if (gs < -0.75) { call = 'POWER! POWER!'; bad = true; }
+  else if (gs < -0.4) call = 'A little power.';
+  else if (behind < 400 && sink > 6.5) call = 'Easy with it. Don\'t dive for the deck.';
+  else if (gs > 0.7) call = sink > 6 ? 'Easy with it.' : 'You\'re high.';
+  else if (lu > 0.9) call = 'Come left.';
+  else if (lu < -0.9) call = 'Right for lineup.';
+  else if (appr.aoaF > 1.2) call = 'You\'re slow.';
+  else if (appr.aoaF < -1.2) call = 'You\'re fast.';
+  if (bad && /WAVE OFF/.test(call)) { if (!appr.waveoff) appr.callT = 0; appr.waveoff = true; }
+  if (call && appr.callT <= 0) lso(call, bad, 1.5);
+}
+function lso(text, bad, t) {
+  appr.lso = { text, bad }; appr.lsoT = t; appr.callT = t + 0.3;
+  audio.beep(bad ? 660 : 990, 0.07, bad ? 0.12 : 0.06);
+}
+// the LSO's grade for the pass just flown (OK, FAIR, NO GRADE), from the ball, lineup and AOA in close
+function lsoGrade() {
+  const S = appr.s;
+  appr.s = null; appr.contact = false;
+  const wo = appr.waveoff; appr.waveoff = false;
+  const hard = appr.hard; appr.hard = 0;
+  if (!S || S.n < 10) return { grade: 'NO GRADE', why: 'no pass seen in close' + (hard ? `, hard landing, ${hard.toFixed(1)} m/s` : '') };
+  const gs = S.gs / S.n, lu = S.lu / S.n, aoa = S.aoa / S.n;
+  const faults = [];
+  if (gs >= 0.3) faults.push(S.low < -0.6 ? 'low in close' : 'not centred on the ball');
+  if (lu >= 0.6) faults.push('drifting on lineup');
+  if (aoa >= 1) faults.push('off on-speed AOA');
+  if (hard) faults.push(`hard landing, ${hard.toFixed(1)} m/s`);
+  if (wo) return { grade: 'NO GRADE', why: 'landed after a wave-off' };
+  let grade = gs < 0.3 && lu < 0.6 && aoa < 1 ? 'OK' : gs < 0.6 && lu < 1.2 && aoa < 2 ? 'FAIR' : 'NO GRADE';
+  if (hard && grade === 'OK') grade = 'FAIR';
+  if (hard > 9.5) grade = 'NO GRADE';
+  return { grade, why: faults.join(', ') || 'good pass' };
+}
+// approach power compensator: holds on-speed AOA with the throttle (Y to engage, any throttle input disengages)
+function autoThrottle(dt, pin, P) {
+  if (!P || P.landed || !P.gear) {
+    if (appr.atc && P && !P.landed) flash('AUTO-THROTTLE OFF', 1.2);
+    appr.atc = false; if (!P || !P.gear) appr.touchAuto = false;
+    return;
+  }
+  const moved = appr.atc && Math.abs(input.throttle - appr.set) > 1e-6;
+  if (input.tapped('atc') || moved) {
+    appr.atc = !appr.atc && !moved; appr.atcI = Math.min(1, input.throttle);
+    flash(appr.atc ? 'AUTO-THROTTLE ON — holding on-speed AOA' : 'AUTO-THROTTLE OFF', 1.6);
+  }
+  // touch screens: engage it automatically when the gear goes down behind the ship
+  if (touch.on && !appr.atc && !appr.touchAuto && appr.st) { appr.atc = true; appr.touchAuto = true; appr.atcI = Math.min(1, input.throttle); flash('AUTO-THROTTLE ON — move the throttle to take over', 2); }
+  if (!appr.atc) return;
+  const a = aoa1g(P);
+  const err = a - ON_SPEED;                                          // rad, + = slow
+  // PI on G-compensated AOA, plus a little lead from its rate so the engine's spool lag doesn't make it hunt
+  const rate = appr.lastA == null ? 0 : (a - appr.lastA) / Math.max(dt, 1e-3);
+  appr.lastA = a;
+  const [ki, kp, kd] = appr.k;
+  appr.atcI = Math.max(0.02, Math.min(1, appr.atcI + err * ki * dt));
+  const t = Math.max(0.02, Math.min(1, appr.atcI + err * kp + rate * kd));
+  input.throttle = t; pin.throttle = t; appr.set = t;
+}
+
 function carrierOf(side) { return G.units.find((u) => u.D.deck && u.alive && u.side === side) || null; }
 function fmtTime(t) { const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`; }
 
@@ -941,13 +1051,15 @@ function deckEvent(e, ev) {
     case 'trap':
       if (me) {
         const wire = Math.max(1, Math.min(4, Math.ceil((pl.landed.along + cv.D.deck.len / 2 - 15) / 20)));
-        hud.showBanner('TRAP!', `Caught the ${['1', '2', '3', '4'][wire - 1]}-wire${wire === 3 ? ' — perfect' : ''}`, '#9dffb8', 2.5);
+        const gr = lsoGrade();
+        hud.showBanner(`TRAP! ${gr.grade}`, `Caught the ${['1', '2', '3', '4'][wire - 1]}-wire${wire === 3 ? ' — the target wire' : ''} · ${gr.why}`, gr.grade === 'OK' ? '#9dffb8' : gr.grade === 'FAIR' ? '#ffe08a' : '#ffb07a', 3.5);
+        feed(`LSO: ${gr.grade} ${wire}-wire${gr.why ? ' · ' + gr.why : ''}`, '#7fe8ff');
         audio.beep(520, 0.2, 0.16);
         if (G.stats) { G.stats.traps++; if (wire === 3) G.stats.perfectTraps = (G.stats.perfectTraps || 0) + 1; }
         if (hooksOut.trap) hooksOut.trap(wire);
       }
       break;
-    case 'touch': if (me) flash('NO WIRE — BOLTER! Full power (R) to go around', 2.5); break;
+    case 'touch': if (me) { lsoGrade(); flash(pl.landed && pl.landed.along > -cv.D.deck.len / 2 + 95 ? 'BOLTER! Landed long, past the wires: full power (R) to go around' : 'NO WIRE — BOLTER! Full power (R) to go around', 3); } break;
     case 'stopped': if (me) flash('On deck — the crew is rearming and repairing you', 2.5); break;
     case 'rearmed':
       if (me) { flash('REARMED, REFUELLED & REPAIRED — throttle to full power (R) to launch', 3); audio.beep(880, 0.15, 0.12); }
@@ -1367,6 +1479,7 @@ function step(dt, now) {
 
   // ---- decisions ----
   const pin = input.flight(dt);
+  autoThrottle(dt, pin, me && me.plane.alive ? me.plane : null);
   for (const e of G.ents) {
     if (!e.local) continue;
     e.plane.prevPos.copy(e.plane.pos);
@@ -1398,7 +1511,11 @@ function step(dt, now) {
         const cv = G.units.find((u) => u.D.deck && u.alive && u.onDeck(pl.pos) && pl.pos.y > u.base + u.D.deck.y - 6);
         if (cv) {
           const r = tryLand(pl, cv);
-          if (r.ok) { land(pl, cv, r); deckEvent(e, r.trap ? 'trap' : 'touch'); continue; }
+          if (r.ok) {
+            // hard landing: the jet survives, but the gear and airframe take a beating
+            if (r.hard) { pl.hp = Math.max(5, pl.hp - 12 - (r.hard - 8) * 8); if (e === me) appr.hard = r.hard; }
+            land(pl, cv, r); deckEvent(e, r.trap ? 'trap' : 'touch'); continue;
+          }
           if (e === me) G.crashWhy = r.why;
         }
         killPlane(e, 'crash');
@@ -1416,6 +1533,7 @@ function step(dt, now) {
     }
   }
   for (const e of G.ents) { if (e.local) e.plane.updateAxes(); else e.plane.update(now, dt); }
+  if (me && me.plane.alive) updateApproach(dt, me.plane); else appr.st = null;
 
   // ---- time trial gates ----
   if (G.race && hot()) {
@@ -1886,20 +2004,9 @@ function strikeHud(P, me, fpmPoint) {
   if (G.radioMenu) out.radio = RADIO.map((r) => r[1]);
   // carrier approach cues
   const cv = carrierOf(me.side);
-  if (cv && !P.landed) {
-    const q = cv.toDeck(P.pos), D = cv.D.deck;
-    const behind = -D.len / 2 + 55 - q.along;
-    const dist = Math.hypot(q.along, q.across);
-    const lined = (P.fwd.x * Math.sin(cv.hdgR) - P.fwd.z * Math.cos(cv.hdgR)) > 0.8;
-    if ((P.gear || dist < 6000) && behind > -40 && behind < 12000 && lined) {
-      const ideal = Math.tan(0.061) * Math.max(0, behind);
-      const dh = q.y - ideal;
-      const line = Math.abs(q.across) < 12 ? 'ON CENTERLINE' : q.across > 0 ? 'COME LEFT' : 'COME RIGHT';
-      const slope = dh > 18 ? 'HIGH' : dh < -18 ? 'LOW' : 'ON GLIDESLOPE';
-      const kt = Math.round(P.speed * 1.944);
-      out.carrierCue = { name: cv.name, dist, line: `${line}`, slope: `${slope} · ${kt} kt${kt > 175 ? ' FAST' : kt < 120 ? ' SLOW' : ''}`, gear: P.gear, ok: line === 'ON CENTERLINE' && slope === 'ON GLIDESLOPE' && P.gear };
-    }
-  }
+  if (cv && !P.landed && appr.st) out.appr = { ...appr.st, name: cv.name, atc: appr.atc, lso: appr.lsoT > 0 ? appr.lso : null, gear: P.gear, flaps: P.flaps, kt: Math.round(P.speed * 1.944) };
+  // the ship's final-approach course for the tactical map
+  if (cv) out.carrierLine = { pos: cv.fromDeck(-cv.D.deck.len / 2, 0), hdg: cv.hdgR, gear: P.gear };
   // briefing markers
   if (G.scn.markers.length) {
     G.markPos = G.markPos || G.scn.markers.map((m) => new THREE.Vector3(m.x, groundHeight(m.x, m.z) + 60, m.z));
@@ -2525,7 +2632,7 @@ initMenu();
 requestAnimationFrame(frame);
 
 // debugging handle
-window.__game = { G, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile, killPlane, touch,
+window.__game = { G, appr, combat, camera, audio, wrecks, world, renderer, scene, startPractice, PRESETS, builder, sanitize, input, hud, unitView, missileCoach, rec, startReplay, replayNextMissile, killPlane, touch,
   // advance the game n frames of 1/60 s (for testing when the tab is in the background)
   get acc() { return acc; },
   tick(n = 60, draw = false) { G.noRender = !draw; try { for (let i = 0; i < n; i++) frame(last + 1000 / 60); } finally { G.noRender = false; } },

@@ -72,8 +72,8 @@ export const LESSONS = {
     name: 'Carrier landing',
     steps: [
       { text: 'The carrier is ahead. Lower the gear (J) and flaps (K).', done: (c) => c.gear && c.flaps > 0 },
-      { text: `Slow to about 140 kt (260 km/h): throttle back with F and use the airbrake (B).`, hint: 'Flaps only come down below ~260 kt; above that they blow back up.', done: (c) => c.speed * KT < 150 },
-      { text: 'Fly the glideslope: keep the carrier cue on the HUD centred (HIGH/LOW, LEFT/RIGHT) and fly onto the back of the deck. Do not flare: let it hit and catch a wire!', hint: 'Sink no faster than 8 m/s, keep the wings level and stay under 200 kt. Missed the wires? Full power (R) to go around.', done: (c) => c.landed && c.landed !== 'roll' },
+      { text: `Slow to approach speed: throttle back (F) until the AOA indexer left of centre shows the amber donut (about 125 kt). Then press Y for auto-throttle: it holds on-speed for you.`, hint: 'Upper green chevron = slow, add power. Lower red chevron = fast, pull power. Flaps only come down below ~260 kt.', done: (c) => c.speed * KT < 150 },
+      { text: 'Fly the glideslope: keep the needles crossed in the middle and the ball level with the green datum lights, and listen to the LSO. Small stick inputs only. Do not flare: fly it onto the deck and catch a wire!', hint: 'Ball high = you are high, ball low = low. Wings level at the ramp. Bolter or wave-off? Full power (R) and come around again.', done: (c) => c.landed && c.landed !== 'roll' },
       { text: 'TRAP! Taxiing to the catapult: the crew rearms, refuels and repairs the jet.', done: (c) => c.landed === 'ready' },
       { text: 'Throttle to full power (R) to launch off the catapult, then raise the gear (J) and flaps (K).', done: (c) => !c.landed && !c.gear && c.alt > 150 },
     ],
